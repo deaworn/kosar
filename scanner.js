@@ -38,3 +38,13 @@ export async function start(video, onCode) {
   }
   return { stop };
 }
+
+// Barcode in a still photo (offline, on the phone). Returns the digits or ''.
+export async function detectInImage(blob) {
+  if (!(await barcodeSupport())) return '';
+  const bmp = await createImageBitmap(blob);
+  try {
+    const found = await new window.BarcodeDetector({ formats: FORMATS }).detect(bmp);
+    return found.map((b) => String(b.rawValue || '').replace(/\D/g, '')).find((c) => c.length >= 8) || '';
+  } finally { bmp.close?.(); }
+}

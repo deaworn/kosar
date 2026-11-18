@@ -4,8 +4,9 @@
 // offline that step silently waits and everything else works.
 import { enrich, enrichKey, lookupBarcode } from './enrich.js';
 import { splitBrand } from './dictionary.js';
-import { putPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob } from './photos.js';
+import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob } from './photos.js';
 import * as scanner from './scanner.js';
+import * as ai from './ai.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -115,19 +116,29 @@ function pics(it) {
 // network step is retried as soon as the phone is back online, or every minute.
 const RETRY_MS = 60000;
 let enriching = false, enrichCount = 0, onlineSince = Date.now();
-const needs = (it) => (it.hu || it.de) && (it.enrich?.key !== enrichKey(it.hu, it.de) ||
-  (it.enrich && !it.enrich.complete && navigator.onLine && (it.enrich.at < onlineSince || Date.now() - it.enrich.at > RETRY_MS)));
+// Two passes: a quick offline pass (dictionary: instant German name and icon) for
+// every changed item first, then the slow network pass (translation, Open Food
+// Facts) newest first, so one slow lookup never hides the instant results.
+const needsQuick = (it) => (it.hu || it.de) && it.enrich?.key !== enrichKey(it.hu, it.de);
+const needs = (it) => needsQuick(it) || ((it.hu || it.de) && it.enrich && navigator.onLine &&
+  (it.enrich.quick || (!it.enrich.complete && (it.enrich.at < onlineSince || Date.now() - it.enrich.at > RETRY_MS))));
 async function kickEnrich() {
   if (enriching) return;
   enriching = true;
   try {
     for (;;) {
-      const it = Object.values(items).find(needs);
+      const all = Object.values(items);
+      const quick = all.find(needsQuick);
+      const todo = quick ? [quick] : all.filter(needs).sort((a, b) => (b.order || 0) - (a.order || 0));
+      const it = todo[0];
       if (!it) break;
-      enrichCount = Object.values(items).filter(needs).length; setNet();
+      enrichCount = all.filter(needs).length; setNet();
       const before = { hu: it.hu, de: it.de };
       let res = null;
-      try { res = await enrich(it, { online: navigator.onLine }); } catch { res = null; }
+      try {
+        res = quick ? await enrich(it, { online: false }) : await enrich(it, { online: navigator.onLine, aiName: ai.configured() ? ai.name : null });
+        if (res && quick && !res.complete) res.patch.enrich.quick = true; // the network pass still has to run
+      } catch { res = null; }
       const now = items[it.id];
       if (!now) continue; // deleted meanwhile
       if (now.hu !== before.hu || now.de !== before.de) continue; // edited meanwhile: run again on the new names
@@ -141,13 +152,13 @@ async function kickEnrich() {
 function setNet() {
   const n = $('net');
   const on = navigator.onLine;
-  n.className = 'net ' + (!on ? 'off' : enriching ? 'busy' : 'ok');
-  n.textContent = !on ? 'offline' : enriching ? 'kiegészítés… ' + (enrichCount || '') : 'online';
+  n.className = 'net ' + (!on ? 'off' : enriching || recognizing ? 'busy' : 'ok');
+  n.textContent = !on ? 'offline' : recognizing ? 'felismerés…' : enriching ? 'kiegészítés… ' + (enrichCount || '') : 'online';
   n.title = !on ? 'Nincs net: a lista működik, a kiegészítés (német név, fotó) netre vár.' : 'Kiegészítés állapota';
 }
 
 // ---- render -----------------------------------------------------------------
-function visible() { return Object.values(items).filter((i) => i.hu || i.de); }
+function visible() { return Object.values(items).filter((i) => i.hu || i.de || i.recog); }
 
 // The picture is its own button: with a photo it zooms, without one it opens the editor.
 function iconHtml(it) {
@@ -174,11 +185,12 @@ function rowHtml(it) {
   const autoTag = (f) => (it[f] && av[f] === it[f] ? '<span class="tag' + (dict ? '' : ' est') + '">' + (dict ? 'auto' : 'tipp?') + '</span>' : '');
   const g = GROUP_LABEL[it.group || 'kell'] ? '<span class="tag">' + GROUP_LABEL[it.group] + '</span>' : '';
   return '<div class="item' + (it.done ? ' done' : '') + '">' +
-    '<button type="button" class="chk" data-act="toggle" aria-pressed="' + !!it.done + '" aria-label="' + esc(it.hu || it.de) + ' kipipálása"><span class="box">' + CHECK + '</span></button>' +
+    '<button type="button" class="chk" data-act="toggle" aria-pressed="' + !!it.done + '" aria-label="' + esc(it.hu || it.de || 'fotós tétel') + ' kipipálása"><span class="box">' + CHECK + '</span></button>' +
     iconHtml(it) +
     '<button type="button" class="body" data-act="edit">' +
     // Without a Hungarian name (e.g. a scanned product) the German name is the title.
-    '<span class="names"><div class="hu">' + esc(it.hu || it.de) + autoTag(it.hu ? 'hu' : 'de') + g + '</div>' +
+    '<span class="names"><div class="hu">' + (it.hu || it.de ? esc(it.hu || it.de) + autoTag(it.hu ? 'hu' : 'de')
+      : it.recog === 'failed' ? '<span class="est">Nem ismertem fel: koppints, írd be</span>' : '<span class="est">Felismerésre vár…</span>') + g + '</div>' +
     (it.hu && it.de ? '<div class="de">' + esc(it.de) + autoTag('de') + '</div>' : '') + metaHtml(it) + '</span>' +
     (it.qty ? '<span class="qty">' + esc(it.qty) + '</span>' : '') + '</button></div>';
 }
@@ -246,12 +258,15 @@ function openEditor(id, d = null) {
   editing = id; draft = d; edPhoto = undefined;
   const it = id ? items[id] : { hu: '', de: '', qty: '', brand: '', group: 'kell', ...d };
   $('edTitle').textContent = id ? 'Tétel szerkesztése' : 'Új tétel';
+  $('edHu').placeholder = id && !it.hu && !it.de ? 'írd be a nevét' : '';
   $('edHu').value = it.hu || ''; $('edDe').value = it.de || ''; $('edQty').value = it.qty || '';
   $('edBrand').value = it.brand || ''; $('edGroup').value = it.group || 'kell';
   $('edDelete').hidden = !id;
   const e = (id ? it.enrich : d?.enrich) || {}, lines = [];
   const link = safeUrl(e.link?.url);
   if (d?.barcode || it.barcode) lines.push('Vonalkód: ' + esc(d?.barcode || it.barcode) + (d?.note ? ' <span class="est">(' + esc(d.note) + ')</span>' : ''));
+  if (id && it.recogSrc) lines.push('Felismerés: ' + esc(it.recogSrc) + ' <span class="est">(javaslat, javítható)</span>');
+  if (id && it.alts?.length) lines.push('Más javaslat: ' + it.alts.map((c, i) => '<button type="button" class="ghost take alt" data-i="' + i + '">' + esc(c.hu || c.de) + (c.brand ? ' · ' + esc(c.brand) : '') + '</button>').join(' '));
   if (e.brand?.value) lines.push('Márka-javaslat: <b>' + esc(e.brand.value) + '</b> <span class="est">(' + esc(e.brand.source) + ')</span>');
   if (e.price?.text) lines.push('Ár: <span class="est">' + esc(e.price.text) + '</span> <span class="est">(' + esc(e.price.source) + ')</span>');
   if (e.store?.value) lines.push('Bolt: <span class="est">' + esc(e.store.value) + '</span> <span class="est">(' + esc(e.store.source) + ')</span>');
@@ -260,6 +275,9 @@ function openEditor(id, d = null) {
   $('edHint').innerHTML = lines.length ? '<div class="h">Javaslat, becslés</div>' + lines.join('<br>') +
     (e.brand?.value && !it.brand ? '<br><button type="button" class="ghost take" id="takeBrand">Márka átvétele</button>' : '') : '';
   const tb = $('takeBrand'); if (tb) tb.onclick = () => { $('edBrand').value = e.brand.value; };
+  for (const b of $('edHint').querySelectorAll('button.alt')) {
+    b.onclick = () => { const c = it.alts[Number(b.dataset.i)]; $('edHu').value = c.hu || ''; $('edDe').value = c.de || ''; $('edBrand').value = c.brand || ''; };
+  }
   if (d?.photoBlob) edPhoto = d.photoBlob;
   showEdPhoto(id);
   $('editor').showModal();
@@ -294,6 +312,7 @@ $('edForm').addEventListener('submit', async () => {
     if (!v.brand && (v.hu !== (it.hu || '') || v.de !== (it.de || ''))) applyBrand(v); // a renamed item may carry a brand
     const patch = {};
     for (const k of Object.keys(v)) if ((it[k] || '') !== v[k]) patch[k] = v[k];
+    if (it.recog && it.recog !== 'done' && (v.hu || v.de)) patch.recog = 'done'; // named by hand: recognition not needed
     if (Object.keys(patch).length) { edit(id, patch); setStatus('Mentve: ' + (v.hu || v.de)); }
   }
   try {
@@ -307,44 +326,147 @@ $('edDelete').addEventListener('click', () => {
   if (it) { remove(editing); setStatus('Törölve: ' + (it.hu || it.de)); }
 });
 
-// ---- scanner: barcode first, photo when there is none ------------------------------
+// ---- add by photo: camera / gallery / paste / share -> "Tovább" -> automatic -------
+// The photo becomes an item right away ("felismerésre vár"). The recognition queue
+// below fills in the names when it can: a barcode read from the photo (offline,
+// on the phone) + Open Food Facts, and Claude on the home machine when reachable.
+let sheetBlob = null;
+function openPhotoSheet() {
+  sheetBlob = null;
+  $('psPreview').hidden = true; $('psChoices').hidden = false; $('psGo').hidden = true;
+  $('psPaste').hidden = !navigator.clipboard?.read;
+  scanner.barcodeSupport().then((ok) => { $('psLive').hidden = !ok; });
+  $('photoSheet').showModal();
+}
+async function takeSheetFile(file) {
+  if (!file) return;
+  try { sheetBlob = await resizeImage(file); } catch { setStatus('Ezt a képet nem tudom megnyitni.'); return; }
+  $('psImg').src = URL.createObjectURL(sheetBlob);
+  $('psPreview').hidden = false; $('psChoices').hidden = true; $('psGo').hidden = false;
+  if (!$('photoSheet').open) $('photoSheet').showModal();
+  $('psGo').focus();
+}
+$('camBtn').addEventListener('click', openPhotoSheet);
+$('psCamera').addEventListener('click', () => $('psCamFile').click());   // native camera app (capture)
+$('psGallery').addEventListener('click', () => $('psGalFile').click());  // gallery / files
+for (const id of ['psCamFile', 'psGalFile']) {
+  $(id).addEventListener('change', async () => { const f = $(id).files[0]; $(id).value = ''; await takeSheetFile(f); });
+}
+$('psPaste').addEventListener('click', async () => {
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find((t) => t.startsWith('image/'));
+      if (type) { await takeSheetFile(await item.getType(type)); return; }
+    }
+    setStatus('A vágólapon nincs kép.');
+  } catch { setStatus('A vágólapot nem tudtam elolvasni (engedély?).'); }
+});
+document.addEventListener('paste', (e) => { // Ctrl+V / long-press paste while the sheet is open
+  if (!$('photoSheet').open) return;
+  const f = [...(e.clipboardData?.files || [])].find((x) => x.type.startsWith('image/'));
+  if (f) { e.preventDefault(); takeSheetFile(f); }
+});
+$('psLive').addEventListener('click', () => { $('photoSheet').close(); openScanner(); });
+$('psCancel').addEventListener('click', () => $('photoSheet').close());
+$('psGo').addEventListener('click', async () => {
+  const blob = sheetBlob; $('photoSheet').close();
+  if (blob) await addPhotoItem(blob);
+});
+
+async function addPhotoItem(blob, extra = {}) {
+  const id = uid();
+  items[id] = { id, hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), photo: true, recog: 'pending', ...extra };
+  persist();
+  try { await setOwnPhoto(id, blob); } catch { setStatus('A fotót nem sikerült menteni (tárhely?).'); }
+  if (!items[id].barcode) {
+    const code = await scanner.detectInImage(blob).catch(() => '');
+    if (code && items[id]) { items[id].barcode = code; persist(); }
+  }
+  render();
+  setStatus(navigator.onLine ? 'Fotó felvéve, felismerés…' : 'Fotó felvéve. Felismerés, ha lesz net és elérhető a gép.');
+  kickRecognize();
+}
+
+// Live barcode scanner (only offered where the browser can read barcodes).
 let scan = null;
 async function openScanner() {
   $('scStatus').textContent = 'Kamera indítása…';
   $('scanner').showModal();
-  if (!scanner.hasCamera()) { $('scStatus').textContent = 'Nincs kamera-hozzáférés. Fotót a tétel szerkesztőjében adhatsz hozzá.'; return; }
-  const canRead = await scanner.barcodeSupport();
   try {
     scan = await scanner.start($('scVideo'), onBarcode);
-    $('scStatus').textContent = canRead ? 'Tartsd a vonalkódot a keretbe.' : 'Ez a böngésző nem olvas vonalkódot. Fotózd le a terméket.';
+    $('scStatus').textContent = 'Tartsd a vonalkódot a keretbe.';
   } catch (e) {
-    $('scStatus').textContent = 'A kamera nem indult el (' + (e?.name || 'hiba') + (e?.name === 'NotAllowedError' ? ': nincs engedély' : '') + '). Fotót a tétel szerkesztőjében adhatsz hozzá.';
-    console.warn('camera start failed', e);
+    $('scStatus').textContent = 'A kamera nem indult el (' + (e?.name || 'hiba') + '). Használd a Fénykép gombot.';
   }
 }
 function closeScanner() { scan?.stop(); scan = null; if ($('scanner').open) $('scanner').close(); }
-async function grabFrame() {
-  try { return await resizeImage($('scVideo')); } catch { return null; }
-}
 async function onBarcode(code) {
-  const frame = await grabFrame();
+  let frame = null;
+  try { frame = await resizeImage($('scVideo')); } catch { /* no frame */ }
   closeScanner();
-  if (!navigator.onLine) { openEditor(null, { barcode: code, photoBlob: frame, note: 'net nélkül: írd be a nevét, a termékfotót és a márkát netre kerülve a vonalkódból keresem' }); return; }
-  setStatus('Vonalkód: ' + code + ', keresés…');
-  let p = null, failed = false;
-  try { p = await lookupBarcode(code); } catch { failed = true; }
-  if (!p) { openEditor(null, { barcode: code, photoBlob: frame, note: failed ? 'a keresés nem sikerült, írd be a nevét' : 'nincs találat, írd be a nevét' }); return; }
-  const enrichInfo = p.photo ? { photo: { url: p.photo, big: p.big, source: 'Open Food Facts (vonalkód)' }, link: { url: p.link, label: p.name || 'termékoldal', source: 'Open Food Facts (vonalkód)' }, autoVals: {}, sources: {} } : null;
-  openEditor(null, { barcode: code, de: p.name, hu: p.nameHu, brand: p.brand, enrich: enrichInfo, photoBlob: p.photo ? null : frame, note: 'Open Food Facts' });
+  if (frame) await addPhotoItem(frame, { barcode: code });
+  else { const id = uid(); items[id] = { id, hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), recog: 'pending', barcode: code }; persist(); render(); kickRecognize(); }
 }
-$('scanBtn').addEventListener('click', openScanner);
 $('scPhoto').addEventListener('click', async () => {
-  const frame = await grabFrame();
+  let frame = null;
+  try { frame = await resizeImage($('scVideo')); } catch { /* camera gave no frame */ }
   closeScanner();
-  openEditor(null, { photoBlob: frame, note: '' });
+  if (frame) await addPhotoItem(frame); else $('psCamFile').click();
 });
 $('scCancel').addEventListener('click', closeScanner);
 $('scanner').addEventListener('close', () => { scan?.stop(); scan = null; });
+
+// ---- recognition queue -------------------------------------------------------------
+const RECOG_RETRY_MS = 50000;
+let recognizing = false;
+const needsRecog = (it) => it.recog === 'pending' && !it.hu && !it.de && navigator.onLine && Date.now() - (it.recogTry || 0) > (it.recogTry ? RECOG_RETRY_MS : 0);
+async function kickRecognize() {
+  if (recognizing) return;
+  recognizing = true; setNet();
+  try {
+    for (;;) {
+      const it = Object.values(items).filter(needsRecog).sort((a, b) => (b.order || 0) - (a.order || 0))[0];
+      if (!it) break;
+      it.recogTry = Date.now(); persist();
+      const patch = {};
+      // a) barcode -> Open Food Facts product (name, brand, product photo)
+      if (it.barcode && !it.offDone) {
+        try {
+          const p = await lookupBarcode(it.barcode);
+          patch.offDone = true;
+          if (p) { if (p.name) patch.de = p.name; if (p.nameHu) patch.hu = p.nameHu; if (p.brand) patch.brand = p.brand; patch.recogSrc = 'Open Food Facts (vonalkód)'; }
+        } catch { /* network: retried later */ }
+      }
+      // b) Claude on the home machine: at most ONE successful call per item (quota)
+      let alts = null;
+      const blob = photoUrls[it.id] && !it.aiDone ? await getPhoto(it.id).catch(() => null) : null;
+      if (blob && ai.configured()) {
+        const res = await ai.recognize(await blobToDataUrl(await resizeImage(blob, 1024)));
+        if (res) {
+          patch.aiDone = true;
+          const [top, ...rest] = res.candidates || [];
+          if (top) {
+            if (!patch.hu && !it.hu) patch.hu = top.hu;
+            if (!patch.de && !it.de) patch.de = top.de;
+            if (!patch.brand && !it.brand && top.brand) patch.brand = top.brand;
+            patch.recogSrc = patch.recogSrc ? patch.recogSrc + ' + Claude' : 'Claude (gép)';
+            alts = rest.filter((c) => c.hu || c.de);
+          }
+          if (res.barcode && !it.barcode) { patch.barcode = res.barcode; patch.offDone = false; }
+        }
+      }
+      const now = items[it.id];
+      if (!now) continue; // deleted meanwhile
+      if (now.hu || now.de) { delete patch.hu; delete patch.de; } // the user typed a name meanwhile: keep it
+      Object.assign(now, patch);
+      if (alts?.length) now.alts = alts;
+      if (now.hu || now.de) now.recog = 'done';
+      else if (now.aiDone && (!now.barcode || now.offDone)) now.recog = 'failed'; // Claude saw it, nothing else to try
+      else if (patch.barcode) now.recogTry = 0; // Claude read a barcode: look it up right away
+      persist(); render(); kickEnrich();
+    }
+  } finally { recognizing = false; setNet(); }
+}
 
 // ---- clear done ---------------------------------------------------------------
 $('clearBtn').addEventListener('click', () => { $('confirmWrap').hidden = false; $('clearBtn').hidden = true; });
@@ -422,7 +544,11 @@ $('imGo').addEventListener('click', async () => {
   setStatus('Importálva: ' + added + ' új' + (updated ? ', ' + updated + ' frissítve' : '') + (pics ? ', ' + pics + ' fotó' : '') + '.');
 });
 $('imCancel').addEventListener('click', () => $('importer').close());
-$('menuBtn').addEventListener('click', () => $('menu').showModal());
+$('menuBtn').addEventListener('click', () => {
+  $('aiState').textContent = ai.configured() ? 'AI-segéd (gép): ellenőrzés…' : 'AI-segéd (gép): nincs beállítva';
+  $('menu').showModal();
+  if (ai.configured()) ai.status().then((st) => { $('aiState').textContent = 'AI-segéd (gép): ' + st; });
+});
 $('menuClose').addEventListener('click', () => $('menu').close());
 $('mImport').addEventListener('click', () => openImport());
 $('mBackup').addEventListener('click', async () => {
@@ -444,6 +570,14 @@ $('mBackup').addEventListener('click', async () => {
 // An import link carries the list in the URL fragment (#import=<base64url JSON>).
 // The fragment never leaves the phone: browsers do not send it to the web host.
 function hashImport() {
+  const a = location.hash.match(/^#ai=([A-Za-z0-9_-]{16,200})(?:&u=([^&]+))?$/);
+  if (a) {
+    history.replaceState(null, '', location.pathname + location.search);
+    ai.setToken(a[1], a[2] ? decodeURIComponent(a[2]) : '');
+    setStatus('AI-segéd beállítva. Ellenőrzés…');
+    ai.status().then((st) => setStatus('AI-segéd: ' + st + '.'));
+    return;
+  }
   const m = location.hash.match(/^#import=([A-Za-z0-9_-]+)$/);
   if (!m) return;
   history.replaceState(null, '', location.pathname + location.search);
@@ -454,17 +588,28 @@ function hashImport() {
   } catch { setStatus('Az import-link hibás.'); }
 }
 
+// Photos shared into the app (Android share sheet -> Kosár) are parked by the
+// service worker in a cache; pick them up and add them like a new photo.
+async function takeShared() {
+  if (!new URLSearchParams(location.search).has('shared')) return;
+  history.replaceState(null, '', location.pathname);
+  try {
+    const c = await caches.open('kosar-share');
+    for (const req of await c.keys()) { const r = await c.match(req); await c.delete(req); if (r) await addPhotoItem(await resizeImage(await r.blob())); }
+  } catch { setStatus('A megosztott képet nem tudtam átvenni.'); }
+}
+
 let statusTimer;
 function setStatus(t) { $('status').textContent = t || ''; clearTimeout(statusTimer); statusTimer = setTimeout(() => ($('status').textContent = ''), 6000); }
 
 // ---- lifecycle ------------------------------------------------------------------
-window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); kickEnrich(); });
+window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); kickEnrich(); kickRecognize(); });
 window.addEventListener('offline', setNet);
 window.addEventListener('hashchange', hashImport); // import link opened while the app is already open
-document.addEventListener('visibilitychange', () => { if (!document.hidden) kickEnrich(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { kickEnrich(); kickRecognize(); } });
 window.addEventListener('storage', (e) => { if (e.key === LS_ITEMS) { try { items = JSON.parse(e.newValue || '{}'); } catch { /* keep */ } render(); } });
-setInterval(() => { if (!document.hidden) kickEnrich(); }, RETRY_MS);
-render(); setNet(); hashImport(); kickEnrich(); loadPhotos();
+setInterval(() => { if (!document.hidden) { kickEnrich(); kickRecognize(); } }, RETRY_MS);
+render(); setNet(); hashImport(); kickEnrich(); loadPhotos().then(() => { takeShared(); kickRecognize(); });
 
 if ('serviceWorker' in navigator) {
   // A new version takes over in the background; reload once so the whole page is
@@ -473,7 +618,7 @@ if ('serviceWorker' in navigator) {
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloaded) return;
-    if ($('editor').open || $('importer').open || $('scanner').open) return; // never lose an open form
+    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open) return; // never lose an open form
     reloaded = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(() => {});

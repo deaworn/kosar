@@ -89,7 +89,7 @@ const searchLink = (q) => 'https://www.google.com/search?tbm=shop&q=' + encodeUR
 // overwritten. When a translation cannot run (offline), the old auto value stays.
 // Returns { patch, complete }; complete=false means a network step failed and
 // the item should be retried later.
-export async function enrich(it, { online = navigator.onLine } = {}) {
+export async function enrich(it, { online = navigator.onLine, aiName = null } = {}) {
   const prevAuto = it.enrich?.autoVals || {};
   const cur = { hu: (it.hu || '').trim(), de: (it.de || '').trim() };
   const user = { hu: cur.hu !== prevAuto.hu ? cur.hu : '', de: cur.de !== prevAuto.de ? cur.de : '' };
@@ -107,7 +107,21 @@ export async function enrich(it, { online = navigator.onLine } = {}) {
     // 1. machine translation
     if (!val) {
       if (!online) complete = false;
-      else { try { val = await translate(user[from], from, other); src = val ? 'MyMemory gépi fordítás' : ''; } catch { complete = false; } }
+      else {
+        // 1a. the home machine's Claude, when reachable (silently skipped otherwise)
+        if (aiName) {
+          try {
+            const a = await aiName(from === 'hu' ? user.hu : '', from === 'de' ? user.de : '');
+            const v = String(a?.[f] || '').trim();
+            if (v && norm(v) !== norm(user[from])) {
+              val = v.slice(0, 80); src = 'Claude (gép)';
+              if (a.brand && !it.brand) info.brand = { value: String(a.brand).slice(0, 40), estimate: true, source: 'Claude (gép)' };
+            }
+          } catch { /* fall through to MyMemory */ }
+        }
+        // 1b. MyMemory
+        if (!val) { try { val = await translate(user[from], from, other); src = val ? 'MyMemory gépi fordítás' : ''; } catch { complete = false; } }
+      }
     }
     if (val) { patch[f] = val; info.autoVals[f] = val; info.sources.translation = src; }
     else if (prevAuto[f] && cur[f] === prevAuto[f]) { info.autoVals[f] = prevAuto[f]; info.sources.translation = it.enrich?.sources?.translation; }
@@ -138,7 +152,7 @@ export async function enrich(it, { online = navigator.onLine } = {}) {
         const src = it.barcode ? 'Open Food Facts (vonalkód)' : 'Open Food Facts';
         if (off?.photo) info.photo = { url: off.photo, big: off.big || '', source: src };
         if (off?.link) info.link = { url: off.link, label: off.name || 'termékoldal', source: src };
-        if (off?.brand) info.brand = { value: off.brand.slice(0, 40), estimate: !it.barcode, source: src };
+        if (off?.brand && (it.barcode || !info.brand)) info.brand = { value: off.brand.slice(0, 40), estimate: !it.barcode, source: src };
       } catch { complete = false; }
     }
   }

@@ -2,7 +2,7 @@
 <html lang="hu">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0f1412">
 <title>Kosár</title>
 <link rel="manifest" href="manifest.webmanifest">
@@ -45,13 +45,13 @@
     <input id="inHu" placeholder="Mit? (magyarul)" aria-label="Tétel magyarul" enterkeyhint="next">
     <input id="inDe" placeholder="Németül (ha tudod)" aria-label="Tétel németül" enterkeyhint="done">
     <button type="submit" aria-label="Hozzáadás">+</button>
-    <button type="button" class="scanbtn" id="scanBtn" aria-label="Vonalkód vagy fotó"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/><path d="M8 8v8M11 8v8M13.5 8v8M16 8v8"/></svg></button>
+    <button type="button" class="scanbtn" id="camBtn" aria-label="Tétel fotóról"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.6"/></svg></button>
   </form>
 </div>
 
 <dialog id="editor" aria-labelledby="edTitle">
   <form id="edForm" method="dialog" autocomplete="off">
-    <h2 id="edTitle">Tétel szerkesztése</h2>
+    <h2 id="edTitle" tabindex="-1" autofocus>Tétel szerkesztése</h2>
     <label>Magyarul<input id="edHu"></label>
     <label>Németül (bolti név)<input id="edDe"></label>
     <div class="row2">
@@ -87,13 +87,14 @@
   <div class="menulist">
     <button type="button" class="mitem" id="mImport"><b>Lista importálása</b><span>régi lista beillesztése vagy fájlból</span></button>
     <button type="button" class="mitem" id="mBackup"><b>Biztonsági mentés</b><span>a lista fájlba vagy megosztásba (pl. magadnak Telegramon)</span></button>
+    <p class="mnote" id="aiState"></p>
     <p class="mnote">A lista csak ezen a telefonon van, nincs szerver és nincs fiók. Net nélkül is működik; a német név, fotó és ár-becslés netre vár.</p>
     <button type="button" class="ghost" id="menuClose">Bezárás</button>
   </div>
 </dialog>
 
 <dialog id="importer" aria-labelledby="imTitle">
-  <h2 id="imTitle">Lista importálása</h2>
+  <h2 id="imTitle" tabindex="-1" autofocus>Lista importálása</h2>
   <label id="imPaste">Illeszd be a listát (export JSON vagy soronként egy tétel)
     <textarea id="imText" rows="6" spellcheck="false"></textarea></label>
   <label class="filebtn" id="imFileWrap">vagy válassz fájlt<input type="file" id="imFile" accept=".json,.txt,application/json,text/plain"></label>
@@ -104,12 +105,27 @@
   </div>
 </dialog>
 
+<dialog id="photoSheet" aria-labelledby="psTitle">
+  <h2 id="psTitle" tabindex="-1" autofocus>Tétel fotóról</h2>
+  <div class="pschoices" id="psChoices">
+    <button type="button" class="pschoice" id="psCamera"><b>Fénykép</b><span>a kamerával</span></button>
+    <button type="button" class="pschoice" id="psGallery"><b>Kép a galériából</b><span>vagy fájlból</span></button>
+    <button type="button" class="pschoice" id="psPaste" hidden><b>Kép beillesztése</b><span>a vágólapról</span></button>
+    <button type="button" class="pschoice" id="psLive" hidden><b>Vonalkód élőben</b><span>a kamera elé tartva</span></button>
+  </div>
+  <div class="pspreview" id="psPreview" hidden><img id="psImg" alt=""><p class="note">A tétel a fotóval felkerül a listára, a nevét a gép tölti ki. Ha a gép most nem érhető el, később magától.</p></div>
+  <input type="file" id="psCamFile" accept="image/*" capture="environment" hidden>
+  <input type="file" id="psGalFile" accept="image/*" hidden>
+  <div class="edbtns"><button type="button" class="ghost" id="psCancel">Mégse</button><span class="grow"></span>
+    <button type="button" class="primary" id="psGo" hidden>Tovább</button></div>
+</dialog>
+
 <dialog id="scanner" aria-labelledby="scTitle">
-  <h2 id="scTitle">Vonalkód vagy fotó</h2>
+  <h2 id="scTitle" tabindex="-1" autofocus>Vonalkód</h2>
   <div class="scview"><video id="scVideo" playsinline muted></video><div class="scframe"></div></div>
   <div class="note" id="scStatus" role="status"></div>
   <div class="edbtns">
-    <button type="button" class="ghost" id="scPhoto">Nincs vonalkód: fotó</button>
+    <button type="button" class="ghost" id="scPhoto">Nincs vonalkód: fotó erről</button>
     <span class="grow"></span>
     <button type="button" class="ghost" id="scCancel">Mégse</button>
   </div>
