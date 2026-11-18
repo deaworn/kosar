@@ -72,3 +72,38 @@ export function lookup(text, lang) {
   }
   return best;
 }
+
+// Brands sold in German supermarkets (plus a few Hungarian ones), used offline to
+// move a brand typed into the item name over to the brand field.
+export const BRANDS = [
+  'Haribo', 'Milka', 'Ritter Sport', 'Lindt', 'Kinder', 'Ferrero', 'Nutella', 'Raffaello', 'Duplo', 'Hanuta', 'Toffifee', 'Merci',
+  'Twix', 'Mars', 'Snickers', 'Bounty', 'KitKat', "M&M's", 'Oreo', 'Leibniz', 'Bahlsen', 'Balisto', 'Trolli', 'Katjes', 'Storck',
+  'Mentos', 'Tic Tac', 'Pringles', 'Lorenz', 'funny-frisch', 'Chio', 'Barilla', 'Buitoni', 'Knorr', 'Maggi', 'Dr. Oetker', 'Iglo',
+  "Ben's Original", "Uncle Ben's", 'Kölln', "Kellogg's", 'Nestlé', 'Nesquik', 'Seitenbacher', 'Heinz', "Hellmann's", 'Kühne',
+  'Bonne Maman', 'Zentis', 'Nutri', 'Alpro', 'Danone', 'Activia', 'Müller', 'Ehrmann', 'Zott', 'Weihenstephan', 'Landliebe',
+  'Bärenmarke', 'Arla', 'Kerrygold', 'Président', 'Philadelphia', 'Exquisa', 'Rama', 'Milbona', 'Milsani', 'Coca-Cola', 'Coca Cola',
+  'Pepsi', 'Fanta', 'Sprite', 'Red Bull', 'Volvic', 'Gerolsteiner', 'Vittel', 'Hohes C', 'Capri-Sun', 'Jacobs', 'Tchibo',
+  'Dallmayr', 'Lavazza', 'Teekanne', 'Meßmer', 'Hipp', 'Alete', 'Milupa', 'Aptamil', 'Bebivita', 'Pampers', 'Penaten', 'Nivea',
+  'Dove', 'Colgate', 'Signal', 'Elmex', 'Oral-B', 'Gillette', 'Head & Shoulders', 'Schwarzkopf', 'Balea', 'Tempo', 'Zewa',
+  'Finish', 'Somat', 'Persil', 'Ariel', 'Lenor', 'Frosch', 'Pril', 'Fairy', 'Sagrotan', 'Domestos', 'Meister Proper', 'Calgon',
+  'Vanish', 'WC-Ente', 'Wagner', 'Rewe Beste Wahl', 'ja!', 'gut&günstig', 'K-Classic', 'Pöttyös', 'Túró Rudi', 'Sió', 'Pick',
+  'Univer', 'Győri', 'Boci', 'Túrórudi',
+];
+
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const BRAND_RE = BRANDS.slice().sort((a, b) => b.length - a.length)
+  .map((b) => [b, new RegExp('(^|[\\s,(])' + esc(b) + '(?=$|[\\s,)])', 'i')]);
+
+// "Haribo tejes gumimaci" -> { brand: 'Haribo', rest: 'tejes gumimaci' }; null if no known brand.
+// A name that is only the brand ("Nutella") keeps its name and also gets the brand.
+export function splitBrand(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  for (const [b, re] of BRAND_RE) {
+    const m = t.match(re);
+    if (!m) continue;
+    const rest = (t.slice(0, m.index) + m[1] + t.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ').replace(/^[\s,-]+|[\s,-]+$/g, '');
+    return { brand: b, rest: rest || t };
+  }
+  return null;
+}

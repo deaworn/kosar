@@ -45,6 +45,7 @@
     <input id="inHu" placeholder="Mit? (magyarul)" aria-label="Tétel magyarul" enterkeyhint="next">
     <input id="inDe" placeholder="Németül (ha tudod)" aria-label="Tétel németül" enterkeyhint="done">
     <button type="submit" aria-label="Hozzáadás">+</button>
+    <button type="button" class="scanbtn" id="scanBtn" aria-label="Vonalkód vagy fotó"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/><path d="M8 8v8M11 8v8M13.5 8v8M16 8v8"/></svg></button>
   </form>
 </div>
 
@@ -64,6 +65,14 @@
         <option value="otthon">Ha otthon elfogyott</option>
       </select>
     </label>
+    <div class="edphoto">
+      <div class="edpic" id="edPhotoBox"></div>
+      <div class="edpbtns">
+        <button type="button" class="ghost" id="edPhotoAdd">Saját fotó</button>
+        <button type="button" class="ghost danger" id="edPhotoDel" hidden>Fotó törlése</button>
+        <input type="file" id="edPhotoFile" accept="image/*" hidden>
+      </div>
+    </div>
     <div class="hint" id="edHint"></div>
     <div class="edbtns">
       <button type="button" class="ghost danger" id="edDelete">Törlés</button>
@@ -94,6 +103,19 @@
     <button type="button" class="primary" id="imGo" disabled>Importálás</button>
   </div>
 </dialog>
+
+<dialog id="scanner" aria-labelledby="scTitle">
+  <h2 id="scTitle">Vonalkód vagy fotó</h2>
+  <div class="scview"><video id="scVideo" playsinline muted></video><div class="scframe"></div></div>
+  <div class="note" id="scStatus" role="status"></div>
+  <div class="edbtns">
+    <button type="button" class="ghost" id="scPhoto">Nincs vonalkód: fotó</button>
+    <span class="grow"></span>
+    <button type="button" class="ghost" id="scCancel">Mégse</button>
+  </div>
+</dialog>
+
+<div class="zoom" id="zoom" hidden role="dialog" aria-label="Kép nagyítva, koppints a bezáráshoz"><img id="zoomImg" alt="" referrerpolicy="no-referrer"></div>
 
 <script type="module" src="app.js"></script>
 </body>

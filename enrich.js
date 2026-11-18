@@ -44,11 +44,11 @@ function openFoodFacts(q) {
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     offLast = Date.now();
     const j = await getJson('https://world.openfoodfacts.org/cgi/search.pl?search_simple=1&json=1&page_size=5' +
-      '&fields=product_name,brands,image_front_small_url,code&search_terms=' + encodeURIComponent(q), 25000);
+      '&fields=product_name,brands,image_front_small_url,image_front_url,code&search_terms=' + encodeURIComponent(q), 25000);
     const list = j.products || [];
     const p = list.find((x) => x.image_front_small_url) || list[0];
     const hit = p ? {
-      photo: p.image_front_small_url || '',
+      photo: p.image_front_small_url || '', big: p.image_front_url || '',
       brand: String(p.brands || '').split(',')[0].trim(),
       link: p.code ? 'https://de.openfoodfacts.org/produkt/' + encodeURIComponent(p.code) : '',
       name: p.product_name || '',
@@ -59,6 +59,27 @@ function openFoodFacts(q) {
   const next = offChain.then(run, run);
   offChain = next.catch(() => {});
   return next;
+}
+
+// Exact product by barcode (EAN/UPC). Fast and precise compared to the text
+// search. Returns the product, null if OFF does not know the code, throws on a
+// network error. Cached like the search (misses expire).
+export async function lookupBarcode(code) {
+  code = String(code || '').replace(/\D/g, '');
+  if (!code) return null;
+  const key = 'ean:' + code, c = offLoad()[key];
+  if (c && (c.hit || Date.now() - c.at < OFF_MISS_TTL)) return c.hit || null;
+  const j = await getJson('https://world.openfoodfacts.org/api/v2/product/' + code + '.json' +
+    '?fields=product_name,product_name_de,product_name_hu,brands,image_front_small_url,image_front_url,code', 15000);
+  const p = j.status === 1 ? j.product || {} : null;
+  const hit = p ? {
+    name: p.product_name_de || p.product_name || '', nameHu: p.product_name_hu || '',
+    brand: String(p.brands || '').split(',')[0].trim(),
+    photo: p.image_front_small_url || '', big: p.image_front_url || '',
+    link: 'https://de.openfoodfacts.org/produkt/' + code,
+  } : null;
+  offLoad()[key] = { at: Date.now(), hit }; offSave();
+  return hit;
 }
 
 const searchLink = (q) => 'https://www.google.com/search?tbm=shop&q=' + encodeURIComponent(q);
@@ -106,16 +127,18 @@ export async function enrich(it, { online = navigator.onLine } = {}) {
     info.store = { value: STORE_TIP[category], estimate: true, source: 'becslés (kategória)' };
   }
 
-  // 2. Open Food Facts (packaged goods only; fresh produce has no product page)
-  const q = de || hu;
-  if (category !== 'produce') {
+  // 2. Open Food Facts: by barcode when the item has one (exact product), else a
+  // text search (packaged goods only; fresh produce has no product page).
+  const q = [it.brand, de || hu].filter(Boolean).join(' ');
+  if (it.barcode || category !== 'produce') {
     if (!online) complete = false;
     else {
       try {
-        const off = await openFoodFacts(q);
-        if (off?.photo) info.photo = { url: off.photo, source: 'Open Food Facts' };
-        if (off?.link) info.link = { url: off.link, label: off.name || 'termékoldal', source: 'Open Food Facts' };
-        if (off?.brand) info.brand = { value: off.brand.slice(0, 40), estimate: true, source: 'Open Food Facts' };
+        const off = it.barcode ? await lookupBarcode(it.barcode) : await openFoodFacts(q);
+        const src = it.barcode ? 'Open Food Facts (vonalkód)' : 'Open Food Facts';
+        if (off?.photo) info.photo = { url: off.photo, big: off.big || '', source: src };
+        if (off?.link) info.link = { url: off.link, label: off.name || 'termékoldal', source: src };
+        if (off?.brand) info.brand = { value: off.brand.slice(0, 40), estimate: !it.barcode, source: src };
       } catch { complete = false; }
     }
   }
