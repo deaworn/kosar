@@ -72,6 +72,11 @@ async function safe(path, body, timeoutMs) {
 }
 export const recognize = (dataUrl) => safe('/recognize', { image: dataUrl }, 75000);
 export const name = (hu, de) => safe('/name', { hu, de }, 55000);
+// Verified link + store price. Returns the result, { pending: true } while the machine searches, or null.
+export async function offer(it) {
+  const r = await safe('/offer', { hu: it.hu || '', de: it.de || '', brand: it.brand || '', barcode: it.barcode || '' }, 30000);
+  return r;
+}
 export async function status() {
   if (!cfg.token) return 'nincs beállítva';
   if (!navigator.onLine) return 'net nélkül nem elérhető';

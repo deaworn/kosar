@@ -33,7 +33,7 @@ const safeUrl = (u) => (/^https:\/\//i.test(String(u || '')) ? String(u) : '');
 
 // ---- persistence --------------------------------------------------------------
 // bv.items is the v1 key and stays the same, so an update keeps the existing list.
-const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 2;
+const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 3;
 let items = {}, savedAt = 0;
 try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
 let storageOk = true, durableTimer = null;
@@ -72,8 +72,8 @@ function applyBrand(r) {
   return r;
 }
 
-// Schema migration. v1 -> v2: brands are split out of names. Items, their ids
-// and done states are never dropped.
+// Schema migration. v1 -> v2: brands are split out of names; v2 -> v3: again, with
+// the longer brand list (e.g. "Golden Toast"). Items, ids and done states are never dropped.
 (function migrate() {
   let v = 1;
   try { v = Number(localStorage.getItem(LS_SCHEMA)) || 1; } catch { /* storage blocked */ }
@@ -93,9 +93,35 @@ function edit(id, patch) {
   Object.assign(it, patch);
   persist(); render(); kickEnrich();
 }
+// Deleted items go to the hist ("Korábbi tételek") with all their data; their
+// photo stays in IndexedDB, so one tap brings everything back.
+const LS_HISTORY = 'bv.history', HISTORY_MAX = 200;
+let hist = {};
+try { hist = JSON.parse(localStorage.getItem(LS_HISTORY) || '{}') || {}; } catch { hist = {}; }
+function saveHistory() {
+  const keys = Object.keys(hist).sort((a, b) => (hist[b].deletedAt || 0) - (hist[a].deletedAt || 0));
+  for (const k of keys.slice(HISTORY_MAX)) { if (hist[k].photo) delPhoto(k).catch(() => {}); delete hist[k]; }
+  try { localStorage.setItem(LS_HISTORY, JSON.stringify(hist)); } catch { /* storage full */ }
+  kvPut('history', hist).catch(() => {});
+}
 function remove(id) {
+  const it = items[id];
+  if (it && (it.hu || it.de)) {
+    // one hist entry per name: a newer delete of the same item replaces the older one
+    for (const [k, h] of Object.entries(hist)) {
+      if (k !== id && (h.hu || '').toLowerCase() === (it.hu || '').toLowerCase() && (h.de || '').toLowerCase() === (it.de || '').toLowerCase()) { if (h.photo) delPhoto(k).catch(() => {}); delete hist[k]; }
+    }
+    hist[id] = { ...it, done: false, deletedAt: Date.now() };
+    saveHistory();
+  } else if (photoUrls[id]) delPhoto(id).catch(() => {});
   delete items[id]; persist(); render();
-  if (photoUrls[id]) { URL.revokeObjectURL(photoUrls[id]); delete photoUrls[id]; delPhoto(id).catch(() => {}); }
+}
+function restore(id) {
+  const h = hist[id]; if (!h) return;
+  const { deletedAt: _d, ...it } = h;
+  items[id] = { ...it, done: false, order: Date.now() };
+  delete hist[id]; saveHistory(); persist(); render(); reveal(id);
+  setStatus('Visszahívva: ' + (it.hu || it.de));
 }
 
 // ---- own photos ----------------------------------------------------------------
@@ -124,7 +150,9 @@ async function clearOwnPhoto(id) {
 function pics(it) {
   if (photoUrls[it.id]) return { small: photoUrls[it.id], big: photoUrls[it.id], own: true };
   const p = it.enrich?.photo, small = safeUrl(p?.url);
-  return small ? { small, big: safeUrl(p.big) || small, own: false } : null;
+  if (small) return { small, big: safeUrl(p.big) || small, own: false };
+  const img = safeUrl(it.offer?.link?.image); // the verified store page's product image
+  return img ? { small: img, big: img, own: false } : null;
 }
 
 // ---- enrichment queue -------------------------------------------------------------
@@ -185,12 +213,17 @@ function iconHtml(it) {
     '<span class="ico' + (p?.own ? ' own' : '') + '">' + svg + img + '</span></button>';
 }
 
+const eur = (v) => Number(v).toFixed(2).replace('.', ',') + ' €';
+// "Aldi Süd 1,29 € / 200 g (11-18)": store, price, unit and the day it was read from the shop page.
+function priceText(p) { return (p.store ? p.store + ' ' : '') + eur(p.value) + (p.unit ? ' / ' + p.unit : '') + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
 function metaHtml(it) {
   const e = it.enrich || {}, parts = [];
-  if (it.brand) parts.push(esc(it.brand));
-  else if (e.brand?.value) parts.push('<span class="est">márka? ' + esc(e.brand.value) + '</span>');
-  if (e.price?.text) parts.push('<span class="est">' + esc(e.price.text) + '</span>');
-  if (e.store?.value) parts.push('<span class="est">' + esc(e.store.value) + '</span>');
+  // a brand only when certain: typed, from the barcode/Claude, or from the verified store page
+  const brand = it.brand || it.offer?.link?.brand || '';
+  if (brand) parts.push(esc(brand));
+  if (it.myPrice) parts.push('<span class="price">' + esc(priceText(it.myPrice)) + '</span> <span class="tag">saját</span>');
+  else if (it.offer?.price) parts.push('<span class="price">' + esc(priceText(it.offer.price)) + '</span>');
+  else if (it.offer) parts.push('<span class="noprice">ár: nem találtam</span>');
   return parts.length ? '<div class="meta">' + parts.join(' · ') + '</div>' : '';
 }
 
@@ -266,13 +299,41 @@ $('zoom').addEventListener('click', () => history.back());
 window.addEventListener('popstate', () => { if (!$('zoom').hidden) closeZoom(); });
 
 // ---- add ----------------------------------------------------------------------
+// Typing suggests earlier (deleted) items; one tap brings one back with everything.
+function suggest() {
+  const q = ($('inHu').value || $('inDe').value).trim().toLowerCase();
+  const box = $('suggest');
+  if (q.length < 2) { box.hidden = true; return; }
+  const hits = Object.entries(hist).filter(([, h]) => ((h.hu || '') + ' ' + (h.de || '') + ' ' + (h.brand || '')).toLowerCase().includes(q))
+    .sort((a, b) => (b[1].deletedAt || 0) - (a[1].deletedAt || 0)).slice(0, 4);
+  box.innerHTML = hits.map(([id, h]) => '<button type="button" class="sug" data-id="' + esc(id) + '"><b>' + esc(h.hu || h.de) + '</b><span>' + esc([h.de && h.hu ? h.de : '', h.brand].filter(Boolean).join(' · ')) + '</span><i>korábbi</i></button>').join('');
+  box.hidden = !hits.length;
+}
+$('inHu').addEventListener('input', suggest); $('inDe').addEventListener('input', suggest);
+$('suggest').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button.sug'); if (!b) return;
+  restore(b.dataset.id); $('inHu').value = ''; $('inDe').value = ''; $('suggest').hidden = true;
+});
+function openHistory() {
+  if ($('menu').open) $('menu').close();
+  const rows = Object.entries(hist).sort((a, b) => (b[1].deletedAt || 0) - (a[1].deletedAt || 0));
+  $('hiList').innerHTML = rows.length ? rows.map(([id, h]) => {
+    const p = pics(h);
+    return '<li><button type="button" class="hrow" data-id="' + esc(id) + '"><span class="ico">' + (p ? '<img src="' + esc(p.small) + '" alt="" referrerpolicy="no-referrer">' : '<svg viewBox="0 0 24 24">' + (ICONS[h.icon] || ICONS.bag) + '</svg>') + '</span>' +
+      '<span class="names"><b>' + esc(h.hu || h.de) + '</b><span>' + esc([h.de && h.hu ? h.de : '', h.brand].filter(Boolean).join(' · ')) + '</span></span><i>vissza</i></button></li>';
+  }).join('') : '<li class="note">Még nincs törölt tétel.</li>';
+  $('history').showModal();
+}
+$('hiList').addEventListener('click', (ev) => { const b = ev.target.closest('button.hrow'); if (!b) return; $('history').close(); restore(b.dataset.id); });
+$('hiClose').addEventListener('click', () => $('history').close());
+
 $('addForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const hu = $('inHu').value.trim(), de = $('inDe').value.trim();
   if (!hu && !de) { $('inHu').focus(); return; }
   const r = applyBrand({ hu, de, qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
   const nid = uid(); edit(nid, r); reveal(nid);
-  $('inHu').value = ''; $('inDe').value = '';
+  $('inHu').value = ''; $('inDe').value = ''; $('suggest').hidden = true;
   setStatus('Felírva: ' + (r.hu || r.de) + (r.brand ? ' (márka: ' + r.brand + ')' : '') + (navigator.onLine ? '' : ' (a német név és a fotó netre vár)'));
   $('inHu').focus();
 });
@@ -287,20 +348,23 @@ function openEditor(id, d = null) {
   $('edHu').placeholder = id && !it.hu && !it.de ? 'írd be a nevét' : '';
   $('edHu').value = it.hu || ''; $('edDe').value = it.de || ''; $('edQty').value = it.qty || '';
   $('edBrand').value = it.brand || ''; $('edGroup').value = it.group || 'kell';
+  $('edPrice').value = it.myPrice ? String(it.myPrice.value).replace('.', ',') : ''; $('edStore').value = it.myPrice?.store || '';
+  $('edPrice').placeholder = it.offer?.price ? eur(it.offer.price.value) + ' (gép)' : 'pl. 1,29';
   $('edDelete').hidden = !id;
   const e = (id ? it.enrich : d?.enrich) || {}, lines = [];
-  const link = safeUrl(e.link?.url);
+  // old items may carry a search-page link from earlier versions: only an exact product (barcode) link is shown
+  const link = /vonalkód/.test(e.link?.source || '') ? safeUrl(e.link?.url) : '';
   if (d?.barcode || it.barcode) lines.push('Vonalkód: ' + esc(d?.barcode || it.barcode) + (d?.note ? ' <span class="est">(' + esc(d.note) + ')</span>' : ''));
   if (id && it.recogSrc) lines.push('Felismerés: ' + esc(it.recogSrc) + ' <span class="est">(javaslat, javítható)</span>');
   if (id && it.alts?.length) lines.push('Más javaslat: ' + it.alts.map((c, i) => '<button type="button" class="ghost take alt" data-i="' + i + '">' + esc(c.hu || c.de) + (c.brand ? ' · ' + esc(c.brand) : '') + '</button>').join(' '));
-  if (e.brand?.value) lines.push('Márka-javaslat: <b>' + esc(e.brand.value) + '</b> <span class="est">(' + esc(e.brand.source) + ')</span>');
-  if (e.price?.text) lines.push('Ár: <span class="est">' + esc(e.price.text) + '</span> <span class="est">(' + esc(e.price.source) + ')</span>');
-  if (e.store?.value) lines.push('Bolt: <span class="est">' + esc(e.store.value) + '</span> <span class="est">(' + esc(e.store.source) + ')</span>');
+  const of = id ? it.offer : null;
+  if (of?.price) lines.push('Ár: <b>' + esc(priceText(of.price)) + '</b>' + (of.price.base ? ' · ' + esc(of.price.base) : '') + ' <span class="note">(a bolti oldalról, ' + esc(of.price.date) + ')</span>');
+  else if (of) lines.push('Ár: nem találtam <span class="note">(ellenőrizve ' + esc(String(of.checked || '').slice(0, 10)) + ')</span>');
+  if (of?.link && safeUrl(of.link.url)) lines.push('<a href="' + esc(of.link.url) + '" target="_blank" rel="noopener noreferrer">Termékoldal: ' + esc(of.link.store) + '</a> <span class="note">(ellenőrzött)</span>');
   if (e.sources?.translation) lines.push('Fordítás forrása: ' + esc(e.sources.translation));
   if (link) lines.push('<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + esc(e.link.label || 'link') + '</a> <span class="est">(' + esc(e.link.source) + ')</span>');
-  $('edHint').innerHTML = lines.length ? '<div class="h">Javaslat, becslés</div>' + lines.join('<br>') +
-    (e.brand?.value && !it.brand ? '<br><button type="button" class="ghost take" id="takeBrand">Márka átvétele</button>' : '') : '';
-  const tb = $('takeBrand'); if (tb) tb.onclick = () => { $('edBrand').value = e.brand.value; };
+  $('edHint').innerHTML = lines.length ? '<div class="h">Részletek</div>' + lines.join('<br>') +
+    '' : '';
   for (const b of $('edHint').querySelectorAll('button.alt')) {
     b.onclick = () => { const c = it.alts[Number(b.dataset.i)]; $('edHu').value = c.hu || ''; $('edDe').value = c.de || ''; $('edBrand').value = c.brand || ''; };
   }
@@ -329,12 +393,15 @@ for (const fid of ['edPhotoFile', 'edPhotoCamFile']) {
 $('edPhotoDel').addEventListener('click', () => { edPhoto = null; showEdPhoto(editing); });
 $('edForm').addEventListener('submit', async () => {
   const v = { hu: $('edHu').value.trim(), de: $('edDe').value.trim(), qty: $('edQty').value.trim(), brand: $('edBrand').value.trim(), group: $('edGroup').value };
+  // own price: always wins over the machine's ("saját"); an empty field removes it
+  const pv = Number($('edPrice').value.replace(',', '.').replace(/[^\d.]/g, ''));
+  const myPrice = pv > 0 && pv < 10000 ? { value: Math.round(pv * 100) / 100, store: $('edStore').value.trim().slice(0, 30), date: new Date().toISOString().slice(0, 10) } : null;
   let id = editing;
   if (!id) { // new item from the scanner
     if (!v.hu && !v.de) { setStatus('Név nélkül nem mentettem.'); return; }
     id = uid();
     applyBrand(v);
-    edit(id, { ...v, done: false, order: Date.now(), ...(draft?.barcode ? { barcode: draft.barcode } : {}), ...(draft?.enrich ? { enrich: draft.enrich } : {}) });
+    edit(id, { ...v, done: false, order: Date.now(), ...(myPrice ? { myPrice } : {}), ...(draft?.barcode ? { barcode: draft.barcode } : {}), ...(draft?.enrich ? { enrich: draft.enrich } : {}) });
     setStatus('Felírva: ' + (v.hu || v.de));
   } else {
     const it = items[id]; if (!it) return;
@@ -342,6 +409,8 @@ $('edForm').addEventListener('submit', async () => {
     const patch = {};
     for (const k of Object.keys(v)) if ((it[k] || '') !== v[k]) patch[k] = v[k];
     if (it.recog && it.recog !== 'done' && (v.hu || v.de)) patch.recog = 'done'; // named by hand: recognition not needed
+    const oldP = it.myPrice ? it.myPrice.value + '|' + it.myPrice.store : '', newP = myPrice ? myPrice.value + '|' + myPrice.store : '';
+    if (oldP !== newP) patch.myPrice = myPrice;
     if (Object.keys(patch).length) { edit(id, patch); setStatus('Mentve: ' + (v.hu || v.de)); }
   }
   try {
@@ -492,9 +561,34 @@ async function kickRecognize() {
       if (now.hu || now.de) now.recog = 'done';
       else if (now.aiDone && (!now.barcode || now.offDone)) now.recog = 'failed'; // Claude saw it, nothing else to try
       else if (patch.barcode) now.recogTry = 0; // Claude read a barcode: look it up right away
-      persist(); render(); kickEnrich();
+      persist(); render(); kickEnrich(); kickOffers();
     }
   } finally { recognizing = false; setNet(); }
+}
+
+// ---- verified link + real store price (home machine) ---------------------
+// The machine searches (Gemini), opens the page itself and keeps a link only if it
+// is this product, a price only if the shop page shows it. A search takes minutes,
+// so the machine answers "pending" first and the app asks again later.
+const OFFER_TTL = 3 * 864e5, OFFER_POLL_MS = 60000;
+const offerKey = (it) => [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase();
+const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (!it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL) &&
+  Date.now() - (it.offerAsked || 0) > OFFER_POLL_MS;
+let offering = false;
+async function kickOffers() {
+  if (offering || !ai.configured() || !navigator.onLine) return;
+  offering = true;
+  try {
+    for (const it of Object.values(items).filter(needsOffer).sort((a, b) => (b.order || 0) - (a.order || 0))) {
+      it.offerAsked = Date.now();
+      const r = await ai.offer(it);
+      if (!r) break; // machine not reachable: try again later
+      if (r.pending) { persist(); continue; }
+      const now = items[it.id]; if (!now) continue;
+      now.offer = { key: offerKey(now), at: Date.now(), checked: r.checked, link: r.link || null, price: r.price || null };
+      persist(); render();
+    }
+  } finally { offering = false; }
 }
 
 // ---- clear done ---------------------------------------------------------------
@@ -525,13 +619,15 @@ function parseImport(text) {
       brand: String(r.brand || '').slice(0, 60), group: ['kell', 'havan', 'otthon'].includes(r.group) ? r.group : 'kell',
       done: !!r.done, order: Number(r.order) || 0, ...(r.barcode ? { barcode: String(r.barcode).replace(/\D/g, '').slice(0, 14) } : {}),
     }));
-    return { rows, photos: own && data.photos && typeof data.photos === 'object' ? data.photos : {} };
+    return { rows, photos: own && data.photos && typeof data.photos === 'object' ? data.photos : {}, hist: own && data.hist && typeof data.hist === 'object' ? data.hist : {} };
   }
   const rows = t.split(/\r?\n/).map((l) => l.replace(/^\s*[-*•]\s*/, '').trim()).filter(Boolean)
     .map((hu, i) => ({ id: '', hu: hu.slice(0, 120), de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now() + i }));
   return { rows, photos: {} };
 }
-async function importData({ rows, photos }) {
+async function importData({ rows, photos, hist: h = {} }) {
+  for (const [id, e] of Object.entries(h)) if (!items[id] && !hist[id] && e && (e.hu || e.de)) hist[id] = e; // earlier items from a backup
+  if (Object.keys(h).length) saveHistory();
   let added = 0, updated = 0, pics = 0;
   for (const r0 of rows) {
     const r = applyBrand({ ...r0 });
@@ -541,7 +637,8 @@ async function importData({ rows, photos }) {
   }
   persist(); render(); kickEnrich();
   for (const [id, url] of Object.entries(photos)) {
-    if (!items[id]) continue;
+    if (!items[id] && !hist[id]) continue;
+    if (hist[id] && !items[id]) { try { await putPhoto(id, await dataUrlToBlob(url)); } catch { /* skip */ } continue; }
     try { await setOwnPhoto(id, await dataUrlToBlob(url)); pics++; } catch { /* skip a bad photo */ }
   }
   return { added, updated, pics };
@@ -580,12 +677,13 @@ $('menuBtn').addEventListener('click', () => {
 });
 $('menuClose').addEventListener('click', () => $('menu').close());
 $('mImport').addEventListener('click', () => openImport());
+$('mHistory').addEventListener('click', openHistory);
 $('mBackup').addEventListener('click', async () => {
   $('menu').close();
   const photos = {};
-  try { for (const [id, blob] of Object.entries(await allPhotos())) if (items[id]) photos[id] = await blobToDataUrl(blob); } catch { /* no photos */ }
+  try { for (const [id, blob] of Object.entries(await allPhotos())) if (items[id] || hist[id]) photos[id] = await blobToDataUrl(blob); } catch { /* no photos */ }
   const rows = Object.values(items).map(({ enrich: _e, ...r }) => r);
-  const text = JSON.stringify({ app: 'kosar', version: SCHEMA, at: new Date().toISOString(), items: rows, photos });
+  const text = JSON.stringify({ app: 'kosar', version: SCHEMA, at: new Date().toISOString(), items: rows, hist, photos });
   // .txt / text/plain: Android Chrome only shares allow-listed file types, and JSON is not one of them.
   const name = 'kosar-mentes-' + new Date().toISOString().slice(0, 10) + '.txt';
   const file = new File([text], name, { type: 'text/plain' });
@@ -633,14 +731,31 @@ let statusTimer;
 function setStatus(t) { $('status').textContent = t || ''; clearTimeout(statusTimer); statusTimer = setTimeout(() => ($('status').textContent = ''), 6000); }
 
 // ---- lifecycle ------------------------------------------------------------------
-window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); kickEnrich(); kickRecognize(); });
+window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); kickEnrich(); kickRecognize(); kickOffers(); });
 window.addEventListener('offline', setNet);
 window.addEventListener('hashchange', hashImport); // import link opened while the app is already open
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { kickEnrich(); kickRecognize(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { kickEnrich(); kickRecognize(); kickOffers(); } });
 window.addEventListener('storage', (e) => { if (e.key === LS_ITEMS) { try { items = JSON.parse(e.newValue || '{}'); } catch { /* keep */ } render(); } });
-setInterval(() => { if (!document.hidden) { kickEnrich(); kickRecognize(); } }, RETRY_MS);
+setInterval(() => { if (!document.hidden) { kickEnrich(); kickRecognize(); kickOffers(); } }, RETRY_MS);
+// Review: at every open and every hour while the app is open, whatever is missing
+// (German name, brand, picture, link, price) is asked for again. A phone does not
+// run a closed web app on a schedule, so this is "on open + hourly while open".
+const LS_REVIEW = 'bv.reviewAt', REVIEW_MS = 3600e3;
+function review(force = false) {
+  let last = 0; try { last = Number(localStorage.getItem(LS_REVIEW)) || 0; } catch { /* blocked */ }
+  if (!force && Date.now() - last < REVIEW_MS) return;
+  for (const it of Object.values(items)) {
+    if (!(it.hu || it.de)) continue;
+    const missing = !it.de || !it.hu || !pics(it) || !it.offer?.link || !(it.offer?.price || it.myPrice);
+    if (missing) { it.offerAsked = 0; if (it.offer && !it.offer.link) it.offer.at = 0; if (it.enrich && !it.enrich.complete) it.enrich.at = 0; }
+  }
+  try { localStorage.setItem(LS_REVIEW, String(Date.now())); } catch { /* blocked */ }
+  persist(); kickEnrich(); kickRecognize(); kickOffers();
+}
+setInterval(() => { if (!document.hidden) review(); }, 5 * 60e3);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) review(); });
 render(); setNet(); hashImport();
-loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); });
+loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); review(true); });
 
 if ('serviceWorker' in navigator) {
   // A new version takes over in the background; reload once so the whole page is

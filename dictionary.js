@@ -87,7 +87,8 @@ export const BRANDS = [
   'Dove', 'Colgate', 'Signal', 'Elmex', 'Oral-B', 'Gillette', 'Head & Shoulders', 'Schwarzkopf', 'Balea', 'Tempo', 'Zewa',
   'Finish', 'Somat', 'Persil', 'Ariel', 'Lenor', 'Frosch', 'Pril', 'Fairy', 'Sagrotan', 'Domestos', 'Meister Proper', 'Calgon',
   'Vanish', 'WC-Ente', 'Wagner', 'Rewe Beste Wahl', 'ja!', 'gut&günstig', 'K-Classic', 'Pöttyös', 'Túró Rudi', 'Sió', 'Pick',
-  'Univer', 'Győri', 'Boci', 'Túrórudi',
+  'Univer', 'Győri', 'Boci', 'Túrórudi', 'Golden Toast', 'Lieken', 'Harry', 'Mestemacher', 'Alnatura', 'Bio Company', 'Lorenz Snack-World',
+  'Leerdammer', 'Bresso', 'Almette', 'Mövenpick', 'Valensina', 'Granini', 'Lipton', 'Ritter', 'Wasa', 'Ültje', 'Bauer', 'Exquisa', 'Weight Watchers',
 ];
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

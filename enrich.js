@@ -6,7 +6,7 @@
 //   2. Open Food Facts (online): product photo, brand, product page; slow and
 //      rate limited, so calls are serialized, spaced, and cached per query
 //   3. category table: price band and store tip, always labelled as estimates
-import { lookup, PRICE_BAND, STORE_TIP } from './dictionary.js';
+import { lookup } from './dictionary.js';
 
 const norm = (s) => String(s || '').toLowerCase().normalize('NFC').trim();
 export const enrichKey = (hu, de) => norm(hu) + '|' + norm(de);
@@ -82,7 +82,6 @@ export async function lookupBarcode(code) {
   return hit;
 }
 
-const searchLink = (q) => 'https://www.google.com/search?tbm=shop&q=' + encodeURIComponent(q);
 
 // A name equal to the previous auto value counts as "not typed by the user":
 // a renamed item gets a fresh translation, while a name the user typed is never
@@ -133,13 +132,8 @@ export async function enrich(it, { online = navigator.onLine, aiName = null } = 
   if (hit && (!it.icon || it.icon === it.enrich?.icon)) { patch.icon = hit[2]; info.icon = hit[2]; }
   info.category = category;
 
-  // 3. category estimates
-  if (category) {
-    const [lo, hi] = PRICE_BAND[category];
-    const eur = (n) => n.toFixed(2).replace('.', ',');
-    info.price = { text: 'kb. ' + eur(lo) + '-' + eur(hi) + ' €', estimate: true, source: 'becslés (kategória)' };
-    info.store = { value: STORE_TIP[category], estimate: true, source: 'becslés (kategória)' };
-  }
+  // No price or store estimates any more : a price only comes from a
+  // verified store page (the home machine's /offer), otherwise "ár: nem találtam".
 
   // 2. Open Food Facts: by barcode when the item has one (exact product), else a
   // text search (packaged goods only; fresh produce has no product page).
@@ -151,12 +145,12 @@ export async function enrich(it, { online = navigator.onLine, aiName = null } = 
         const off = it.barcode ? await lookupBarcode(it.barcode) : await openFoodFacts(q);
         const src = it.barcode ? 'Open Food Facts (vonalkód)' : 'Open Food Facts';
         if (off?.photo) info.photo = { url: off.photo, big: off.big || '', source: src };
-        if (off?.link) info.link = { url: off.link, label: off.name || 'termékoldal', source: src };
+        // a link only when it is exactly this product: the barcode lookup (a text search may hit a similar product)
+        if (off?.link && it.barcode) info.link = { url: off.link, label: off.name || 'termékoldal', source: src };
         if (off?.brand && (it.barcode || !info.brand)) info.brand = { value: off.brand.slice(0, 40), estimate: !it.barcode, source: src };
       } catch { complete = false; }
     }
   }
-  if (!info.link) info.link = { url: searchLink(q), label: 'keresés: ' + q, source: 'Google Shopping keresés' };
 
   info.key = enrichKey(hu, de);
   info.complete = complete;

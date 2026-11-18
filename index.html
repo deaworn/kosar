@@ -41,6 +41,7 @@
   <div class="warn" id="storeWarn" hidden>A telefon nem engedi menteni a listát (privát lap?). Nyisd meg sima Chrome-lapon.</div>
 </div>
 
+<div class="suggest" id="suggest" hidden></div>
 <div class="addbar">
   <form id="addForm" autocomplete="off">
     <input id="inHu" placeholder="Mit? (magyarul)" aria-label="Tétel magyarul" enterkeyhint="next">
@@ -58,6 +59,10 @@
     <div class="row2">
       <label>Mennyiség<input id="edQty" placeholder="pl. 2 db"></label>
       <label>Márka<input id="edBrand" placeholder="bármelyik"></label>
+    </div>
+    <div class="row2">
+      <label>Saját ár (€)<input id="edPrice" inputmode="decimal" placeholder="pl. 1,29"></label>
+      <label>Bolt<input id="edStore" placeholder="pl. Aldi Süd"></label>
     </div>
     <label>Szakasz
       <select id="edGroup">
@@ -88,6 +93,7 @@
 
 <dialog id="menu" aria-label="Menü">
   <div class="menulist">
+    <button type="button" class="mitem" id="mHistory"><b>Korábbi tételek</b><span>törölt tételek visszahívása egy koppintással</span></button>
     <button type="button" class="mitem" id="mImport"><b>Lista importálása</b><span>régi lista beillesztése vagy fájlból</span></button>
     <button type="button" class="mitem" id="mBackup"><b>Biztonsági mentés</b><span>a lista fájlba vagy megosztásba (pl. magadnak Telegramon)</span></button>
     <p class="mnote" id="aiState"></p>
@@ -121,6 +127,12 @@
   <input type="file" id="psGalFile" accept="image/*" hidden>
   <div class="edbtns"><button type="button" class="ghost" id="psCancel">Mégse</button><span class="grow"></span>
     <button type="button" class="primary" id="psGo" hidden>Tovább</button></div>
+</dialog>
+
+<dialog id="history" aria-labelledby="hiTitle">
+  <h2 id="hiTitle" tabindex="-1" autofocus>Korábbi tételek</h2>
+  <ul class="hilist" id="hiList"></ul>
+  <div class="edbtns"><span class="grow"></span><button type="button" class="ghost" id="hiClose">Bezárás</button></div>
 </dialog>
 
 <dialog id="scanner" aria-labelledby="scTitle">
