@@ -149,7 +149,9 @@ async function clearOwnPhoto(id) {
 // Small and big picture for an item: own photo first, then the Open Food Facts one.
 function pics(it) {
   if (photoUrls[it.id]) return { small: photoUrls[it.id], big: photoUrls[it.id], own: true };
-  const p = it.enrich?.photo, small = safeUrl(p?.url);
+  // an Open Food Facts picture only when it is exactly this product (barcode); a text-search
+  // picture may show a different product (measured: "Bacon" showed a margarine)
+  const p = it.enrich?.photo, small = /vonalkód/.test(p?.source || '') ? safeUrl(p?.url) : '';
   if (small) return { small, big: safeUrl(p.big) || small, own: false };
   const img = safeUrl(it.offer?.link?.image); // the verified store page's product image
   return img ? { small: img, big: img, own: false } : null;

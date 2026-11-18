@@ -3,8 +3,7 @@
 // never depends on this module.
 //   0. built-in dictionary (offline): exact match = reliable translation ("auto")
 //   1. MyMemory machine translation (online): only for a missing language, shown as "tipp?"
-//   2. Open Food Facts (online): product photo, brand, product page; slow and
-//      rate limited, so calls are serialized, spaced, and cached per query
+//   2. Open Food Facts (online), by barcode only: the exact product's photo, brand, page
 //   3. category table: price band and store tip, always labelled as estimates
 import { lookup } from './dictionary.js';
 
@@ -30,37 +29,9 @@ async function translate(text, from, to) {
 // ---- Open Food Facts --------------------------------------------------------
 const OFF_KEY = 'bv.off';
 const OFF_MISS_TTL = 7 * 24 * 3600e3;
-const OFF_GAP_MS = 7000; // the search endpoint allows about 10 requests a minute
-let offCache = null, offLast = 0, offChain = Promise.resolve();
+let offCache = null;
 function offLoad() { if (!offCache) { try { offCache = JSON.parse(localStorage.getItem(OFF_KEY) || '{}'); } catch { offCache = {}; } } return offCache; }
 function offSave() { try { localStorage.setItem(OFF_KEY, JSON.stringify(offCache)); } catch { /* cache is optional */ } }
-
-// Returns the product, null for "no product", throws on a network error (not cached, retried later).
-function openFoodFacts(q) {
-  const key = norm(q), c = offLoad()[key];
-  if (c && (c.hit || Date.now() - c.at < OFF_MISS_TTL)) return Promise.resolve(c.hit || null);
-  const run = async () => {
-    const wait = offLast + OFF_GAP_MS - Date.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    offLast = Date.now();
-    const j = await getJson('https://world.openfoodfacts.org/cgi/search.pl?search_simple=1&json=1&page_size=5' +
-      '&fields=product_name,brands,image_front_small_url,image_front_url,code&search_terms=' + encodeURIComponent(q), 25000);
-    const list = j.products || [];
-    const p = list.find((x) => x.image_front_small_url) || list[0];
-    const hit = p ? {
-      photo: p.image_front_small_url || '', big: p.image_front_url || '',
-      brand: String(p.brands || '').split(',')[0].trim(),
-      link: p.code ? 'https://de.openfoodfacts.org/produkt/' + encodeURIComponent(p.code) : '',
-      name: p.product_name || '',
-    } : null;
-    offLoad()[key] = { at: Date.now(), hit }; offSave();
-    return hit;
-  };
-  const next = offChain.then(run, run);
-  offChain = next.catch(() => {});
-  return next;
-}
-
 // Exact product by barcode (EAN/UPC). Fast and precise compared to the text
 // search. Returns the product, null if OFF does not know the code, throws on a
 // network error. Cached like the search (misses expire).
@@ -142,7 +113,9 @@ export async function enrich(it, { online = navigator.onLine, aiName = null } = 
     if (!online) complete = false;
     else {
       try {
-        const off = it.barcode ? await lookupBarcode(it.barcode) : await openFoodFacts(q);
+        // exact product only: by barcode. (A text search may return a similar product;
+        // pictures and links of the verified store page come from the home machine instead.)
+        const off = it.barcode ? await lookupBarcode(it.barcode) : null;
         const src = it.barcode ? 'Open Food Facts (vonalkód)' : 'Open Food Facts';
         if (off?.photo) info.photo = { url: off.photo, big: off.big || '', source: src };
         // a link only when it is exactly this product: the barcode lookup (a text search may hit a similar product)
