@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1412">
+<title>Kosár</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <svg class="ring" viewBox="0 0 58 58" aria-hidden="true">
+      <circle class="track" cx="29" cy="29" r="24"></circle>
+      <circle class="bar" id="bar" cx="29" cy="29" r="24" stroke-dasharray="150.8" stroke-dashoffset="150.8"></circle>
+      <text id="ringtxt" x="29" y="29">0/0</text>
+    </svg>
+    <div class="htext">
+      <h1>Kosár</h1>
+      <div class="sub" id="sub">Betöltés…</div>
+    </div>
+    <span class="net" id="net" role="status"></span>
+    <button class="menubtn" id="menuBtn" type="button" aria-label="Menü">⋯</button>
+  </header>
+
+  <div id="list"></div>
+
+  <div class="tools" id="tools" hidden>
+    <button class="ghost" id="clearBtn" type="button">Kipipáltak törlése</button>
+    <span id="confirmWrap" hidden>
+      <span class="note">Biztos?</span>
+      <button class="ghost danger" id="confirmYes" type="button">Igen, törlöm</button>
+      <button class="ghost" id="confirmNo" type="button">Mégse</button>
+    </span>
+  </div>
+  <div class="status" id="status" role="status"></div>
+  <div class="warn" id="storeWarn" hidden>A telefon nem engedi menteni a listát (privát lap?). Nyisd meg sima Chrome-lapon.</div>
+</div>
+
+<div class="addbar">
+  <form id="addForm" autocomplete="off">
+    <input id="inHu" placeholder="Mit? (magyarul)" aria-label="Tétel magyarul" enterkeyhint="next">
+    <input id="inDe" placeholder="Németül (ha tudod)" aria-label="Tétel németül" enterkeyhint="done">
+    <button type="submit" aria-label="Hozzáadás">+</button>
+  </form>
+</div>
+
+<dialog id="editor" aria-labelledby="edTitle">
+  <form id="edForm" method="dialog" autocomplete="off">
+    <h2 id="edTitle">Tétel szerkesztése</h2>
+    <label>Magyarul<input id="edHu"></label>
+    <label>Németül (bolti név)<input id="edDe"></label>
+    <div class="row2">
+      <label>Mennyiség<input id="edQty" placeholder="pl. 2 db"></label>
+      <label>Márka<input id="edBrand" placeholder="bármelyik"></label>
+    </div>
+    <label>Szakasz
+      <select id="edGroup">
+        <option value="kell">Kell</option>
+        <option value="havan">Ha van</option>
+        <option value="otthon">Ha otthon elfogyott</option>
+      </select>
+    </label>
+    <div class="hint" id="edHint"></div>
+    <div class="edbtns">
+      <button type="button" class="ghost danger" id="edDelete">Törlés</button>
+      <span class="grow"></span>
+      <button type="button" class="ghost" id="edCancel">Mégse</button>
+      <button type="submit" class="primary" id="edSave">Mentés</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="menu" aria-label="Menü">
+  <div class="menulist">
+    <button type="button" class="mitem" id="mImport"><b>Lista importálása</b><span>régi lista beillesztése vagy fájlból</span></button>
+    <button type="button" class="mitem" id="mBackup"><b>Biztonsági mentés</b><span>a lista fájlba vagy megosztásba (pl. magadnak Telegramon)</span></button>
+    <p class="mnote">A lista csak ezen a telefonon van, nincs szerver és nincs fiók. Net nélkül is működik; a német név, fotó és ár-becslés netre vár.</p>
+    <button type="button" class="ghost" id="menuClose">Bezárás</button>
+  </div>
+</dialog>
+
+<dialog id="importer" aria-labelledby="imTitle">
+  <h2 id="imTitle">Lista importálása</h2>
+  <label id="imPaste">Illeszd be a listát (export JSON vagy soronként egy tétel)
+    <textarea id="imText" rows="6" spellcheck="false"></textarea></label>
+  <label class="filebtn" id="imFileWrap">vagy válassz fájlt<input type="file" id="imFile" accept=".json,.txt,application/json,text/plain"></label>
+  <div class="hint" id="imInfo"></div>
+  <div class="edbtns"><span class="grow"></span>
+    <button type="button" class="ghost" id="imCancel">Mégse</button>
+    <button type="button" class="primary" id="imGo" disabled>Importálás</button>
+  </div>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
