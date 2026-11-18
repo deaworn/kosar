@@ -377,9 +377,13 @@ function openEditor(id, d = null) {
 function showEdPhoto(id) {
   const box = $('edPhotoBox');
   const ownUrl = edPhoto ? URL.createObjectURL(edPhoto) : edPhoto === null ? '' : (id && photoUrls[id]) || '';
-  const offUrl = safeUrl((id ? items[id]?.enrich : draft?.enrich)?.photo?.url);
-  const url = ownUrl || offUrl;
-  box.innerHTML = url ? '<img src="' + esc(url) + '" alt="" referrerpolicy="no-referrer">' + (ownUrl ? '' : '<span class="est">Open Food Facts</span>') : '<span class="note">Nincs fotó</span>';
+  // otherwise the exact-product picture, labelled with its real source (barcode -> Open Food Facts, else the verified store)
+  const src = id ? items[id] : draft || {};
+  const ph = src?.enrich?.photo, barcodeUrl = /vonalkód/.test(ph?.source || '') ? safeUrl(ph?.url) : '';
+  const storeUrl = safeUrl(src?.offer?.link?.image);
+  const url = ownUrl || barcodeUrl || storeUrl;
+  const label = ownUrl ? '' : barcodeUrl ? 'Open Food Facts' : storeUrl ? src.offer.link.store : '';
+  box.innerHTML = url ? '<img src="' + esc(url) + '" alt="" referrerpolicy="no-referrer">' + (label ? '<span class="est">' + esc(label) + '</span>' : '') : '<span class="note">Nincs fotó</span>';
   $('edPhotoDel').hidden = !ownUrl;
 }
 // Two buttons: on Android 14+ a plain image input opens the photo picker only (no camera).
