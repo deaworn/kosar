@@ -574,7 +574,8 @@ async function kickRecognize() {
 // so the machine answers "pending" first and the app asks again later.
 const OFFER_TTL = 3 * 864e5, OFFER_POLL_MS = 60000;
 const offerKey = (it) => [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase();
-const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (!it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL) &&
+const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (!it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
+  (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3)) &&
   Date.now() - (it.offerAsked || 0) > OFFER_POLL_MS;
 let offering = false;
 async function kickOffers() {
