@@ -4,7 +4,7 @@
 // offline that step silently waits and everything else works.
 import { enrich, enrichKey, lookupBarcode } from './enrich.js';
 import { splitBrand } from './dictionary.js';
-import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob } from './photos.js';
+import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
 
@@ -34,12 +34,28 @@ const safeUrl = (u) => (/^https:\/\//i.test(String(u || '')) ? String(u) : '');
 // ---- persistence --------------------------------------------------------------
 // bv.items is the v1 key and stays the same, so an update keeps the existing list.
 const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 2;
-let items = {};
-try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; } catch { items = {}; }
-let storageOk = true;
+let items = {}, savedAt = 0;
+try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
+let storageOk = true, durableTimer = null;
+// Two copies: localStorage (instant at start-up) and IndexedDB (durable). Every
+// change goes to both; the IndexedDB write is coalesced over 300 ms.
 function persist() {
-  try { localStorage.setItem(LS_ITEMS, JSON.stringify(items)); storageOk = true; } catch { storageOk = false; }
+  savedAt = Date.now();
+  try { localStorage.setItem(LS_ITEMS, JSON.stringify(items)); localStorage.setItem('bv.itemsAt', String(savedAt)); storageOk = true; } catch { storageOk = false; }
+  clearTimeout(durableTimer);
+  durableTimer = setTimeout(() => { kvPut('items', { at: savedAt, items }).catch(() => {}); }, 300);
 }
+// At start-up: if the durable copy is newer (localStorage lost its last writes), use it.
+async function loadDurable() {
+  try {
+    // An older page holding the database open can block the upgrade: never let that hold up the app.
+    const d = await Promise.race([kvGet('items'), new Promise((_, no) => setTimeout(() => no(new Error('idb timeout')), 3000))]);
+    if (d && d.items && d.at > savedAt) { items = d.items; savedAt = d.at; try { localStorage.setItem(LS_ITEMS, JSON.stringify(items)); localStorage.setItem('bv.itemsAt', String(savedAt)); } catch { /* blocked */ } render(); }
+    else if (!d) kvPut('items', { at: savedAt || Date.now(), items }).catch(() => {}); // first run of this version: seed it
+  } catch { /* IndexedDB unavailable: localStorage only */ }
+}
+// Flush the durable copy right away when the app goes to the background.
+document.addEventListener('visibilitychange', () => { if (document.hidden && durableTimer) { clearTimeout(durableTimer); durableTimer = null; kvPut('items', { at: savedAt, items }).catch(() => {}); } });
 // Ask the browser not to evict the list under storage pressure (installed PWAs usually get this).
 navigator.storage?.persist?.().catch(() => {});
 
@@ -623,7 +639,8 @@ window.addEventListener('hashchange', hashImport); // import link opened while t
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { kickEnrich(); kickRecognize(); } });
 window.addEventListener('storage', (e) => { if (e.key === LS_ITEMS) { try { items = JSON.parse(e.newValue || '{}'); } catch { /* keep */ } render(); } });
 setInterval(() => { if (!document.hidden) { kickEnrich(); kickRecognize(); } }, RETRY_MS);
-render(); setNet(); hashImport(); kickEnrich(); loadPhotos().then(() => { takeShared(); kickRecognize(); });
+render(); setNet(); hashImport();
+loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); });
 
 if ('serviceWorker' in navigator) {
   // A new version takes over in the background; reload once so the whole page is
