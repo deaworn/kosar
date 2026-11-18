@@ -195,6 +195,16 @@ function rowHtml(it) {
     (it.qty ? '<span class="qty">' + esc(it.qty) + '</span>' : '') + '</button></div>';
 }
 
+// Bring a just-added item into view (new items sort to the end of their section).
+function reveal(id) {
+  requestAnimationFrame(() => {
+    const li = document.querySelector('#list li[data-id="' + CSS.escape(id) + '"]');
+    if (!li) return;
+    li.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    li.classList.add('flash'); setTimeout(() => li.classList.remove('flash'), 1600);
+  });
+}
+
 function render() {
   const all = visible(), total = all.length, done = all.filter((i) => i.done).length;
   $('ringtxt').textContent = done + '/' + total;
@@ -245,7 +255,7 @@ $('addForm').addEventListener('submit', (e) => {
   const hu = $('inHu').value.trim(), de = $('inDe').value.trim();
   if (!hu && !de) { $('inHu').focus(); return; }
   const r = applyBrand({ hu, de, qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
-  edit(uid(), r);
+  const nid = uid(); edit(nid, r); reveal(nid);
   $('inHu').value = ''; $('inDe').value = '';
   setStatus('Felírva: ' + (r.hu || r.de) + (r.brand ? ' (márka: ' + r.brand + ')' : '') + (navigator.onLine ? '' : ' (a német név és a fotó netre vár)'));
   $('inHu').focus();
@@ -289,14 +299,17 @@ function showEdPhoto(id) {
   const url = ownUrl || offUrl;
   box.innerHTML = url ? '<img src="' + esc(url) + '" alt="" referrerpolicy="no-referrer">' + (ownUrl ? '' : '<span class="est">Open Food Facts</span>') : '<span class="note">Nincs fotó</span>';
   $('edPhotoDel').hidden = !ownUrl;
-  $('edPhotoAdd').textContent = ownUrl ? 'Másik fotó' : 'Saját fotó';
 }
+// Two buttons: on Android 14+ a plain image input opens the photo picker only (no camera).
+$('edPhotoCam').addEventListener('click', () => $('edPhotoCamFile').click());
 $('edPhotoAdd').addEventListener('click', () => $('edPhotoFile').click());
-$('edPhotoFile').addEventListener('change', async () => {
-  const f = $('edPhotoFile').files[0]; $('edPhotoFile').value = '';
-  if (!f) return;
-  try { edPhoto = await resizeImage(f); showEdPhoto(editing); } catch { setStatus('Ezt a képet nem tudom megnyitni.'); }
-});
+for (const fid of ['edPhotoFile', 'edPhotoCamFile']) {
+  $(fid).addEventListener('change', async () => {
+    const f = $(fid).files[0]; $(fid).value = '';
+    if (!f) return;
+    try { edPhoto = await resizeImage(f); showEdPhoto(editing); } catch { setStatus('Ezt a képet nem tudom megnyitni.'); }
+  });
+}
 $('edPhotoDel').addEventListener('click', () => { edPhoto = null; showEdPhoto(editing); });
 $('edForm').addEventListener('submit', async () => {
   const v = { hu: $('edHu').value.trim(), de: $('edDe').value.trim(), qty: $('edQty').value.trim(), brand: $('edBrand').value.trim(), group: $('edGroup').value };
@@ -382,7 +395,7 @@ async function addPhotoItem(blob, extra = {}) {
     const code = await scanner.detectInImage(blob).catch(() => '');
     if (code && items[id]) { items[id].barcode = code; persist(); }
   }
-  render();
+  render(); reveal(id);
   setStatus(navigator.onLine ? 'Fotó felvéve, felismerés…' : 'Fotó felvéve. Felismerés, ha lesz net és elérhető a gép.');
   kickRecognize();
 }
@@ -547,7 +560,7 @@ $('imCancel').addEventListener('click', () => $('importer').close());
 $('menuBtn').addEventListener('click', () => {
   $('aiState').textContent = ai.configured() ? 'AI-segéd (gép): ellenőrzés…' : 'AI-segéd (gép): nincs beállítva';
   $('menu').showModal();
-  if (ai.configured()) ai.status().then((st) => { $('aiState').textContent = 'AI-segéd (gép): ' + st; });
+  if (ai.configured()) { const lf = ai.lastFailure(); ai.status().then((st) => { $('aiState').textContent = 'AI-segéd (gép): ' + st + (lf ? ' · utolsó hiba: ' + lf : ''); }); }
 });
 $('menuClose').addEventListener('click', () => $('menu').close());
 $('mImport').addEventListener('click', () => openImport());
@@ -557,8 +570,9 @@ $('mBackup').addEventListener('click', async () => {
   try { for (const [id, blob] of Object.entries(await allPhotos())) if (items[id]) photos[id] = await blobToDataUrl(blob); } catch { /* no photos */ }
   const rows = Object.values(items).map(({ enrich: _e, ...r }) => r);
   const text = JSON.stringify({ app: 'kosar', version: SCHEMA, at: new Date().toISOString(), items: rows, photos });
-  const name = 'kosar-mentes-' + new Date().toISOString().slice(0, 10) + '.json';
-  const file = new File([text], name, { type: 'application/json' });
+  // .txt / text/plain: Android Chrome only shares allow-listed file types, and JSON is not one of them.
+  const name = 'kosar-mentes-' + new Date().toISOString().slice(0, 10) + '.txt';
+  const file = new File([text], name, { type: 'text/plain' });
   try {
     if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: 'Kosár mentés' }); return; }
   } catch (e) { if (e.name === 'AbortError') return; }

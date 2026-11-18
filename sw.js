@@ -2,7 +2,7 @@
 // picks up new versions next time. Other origins (translation, Open Food Facts)
 // pass through untouched, except product photos, which are cached cache-first
 // so they also show offline.
-const SHELL = 'kosar-shell-v5';
+const SHELL = 'kosar-shell-v6';
 const SHARE = 'kosar-share';
 const IMG = 'kosar-img-v1';
 const ASSETS = ['./', 'index.html', 'app.js', 'enrich.js', 'dictionary.js', 'photos.js', 'scanner.js', 'ai.js', 'style.css', 'manifest.webmanifest',

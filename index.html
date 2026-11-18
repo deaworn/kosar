@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="hu">
+<html lang="hu" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0f1412">
 <title>Kosár</title>
@@ -68,8 +69,10 @@
     <div class="edphoto">
       <div class="edpic" id="edPhotoBox"></div>
       <div class="edpbtns">
-        <button type="button" class="ghost" id="edPhotoAdd">Saját fotó</button>
+        <button type="button" class="ghost" id="edPhotoCam">Fénykép</button>
+        <button type="button" class="ghost" id="edPhotoAdd">Galéria</button>
         <button type="button" class="ghost danger" id="edPhotoDel" hidden>Fotó törlése</button>
+        <input type="file" id="edPhotoCamFile" accept="image/*" capture="environment" hidden>
         <input type="file" id="edPhotoFile" accept="image/*" hidden>
       </div>
     </div>

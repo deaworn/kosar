@@ -5,8 +5,12 @@
 // phone. Every failure is silent: the caller falls back to the free path.
 const GIST = 'https://api.github.com/gists/645f862b3318ab9fbfc259c14c1eee6a';
 const LS = 'bv.ai';
-const DOWN_MS = 45000; // after a failure, do not try again for 45 s
-let cfg = load(), downUntil = 0, discovering = null;
+// Back-off: an unreachable machine (network error) pauses every kind of call for
+// 45 s; a Claude-side error (HTTP 5xx: the machine answered) pauses only that kind
+// for 20 s; a refusal (401/429/4xx) pauses that kind for 10 minutes.
+const DOWN_MS = { network: 45000, server: 20000, refused: 600000 };
+let cfg = load(), downUntil = { all: 0 }, discovering = null, lastError = '';
+export const lastFailure = () => lastError;
 
 function load() { try { return JSON.parse(localStorage.getItem(LS) || '{}') || {}; } catch { return {}; } }
 function save() { try { localStorage.setItem(LS, JSON.stringify(cfg)); } catch { /* storage blocked */ } }
@@ -14,7 +18,7 @@ function save() { try { localStorage.setItem(LS, JSON.stringify(cfg)); } catch {
 export const configured = () => !!cfg.token;
 export function setToken(token, url = '') {
   cfg = { token: String(token).slice(0, 200), url: url && /^https?:\/\//.test(url) ? url.replace(/\/$/, '') : '', fixed: !!url };
-  downUntil = 0; save();
+  downUntil = { all: 0 }; save();
 }
 export function forget() { cfg = {}; save(); }
 
@@ -56,14 +60,21 @@ async function call(path, body, timeoutMs) {
 
 // Returns the result, or null when the helper is not configured, offline, or unreachable.
 async function safe(path, body, timeoutMs) {
-  if (!cfg.token || !navigator.onLine || Date.now() < downUntil) return null;
-  try { return await call(path, body, timeoutMs); } catch { downUntil = Date.now() + DOWN_MS; return null; }
+  const now = Date.now();
+  if (!cfg.token || !navigator.onLine || now < downUntil.all || now < (downUntil[path] || 0)) return null;
+  try { const r = await call(path, body, timeoutMs); lastError = ''; return r; } catch (e) {
+    const m = String(e.message || e).match(/http (\d+)/), code = m ? Number(m[1]) : 0;
+    if (!code) downUntil.all = Date.now() + DOWN_MS.network;
+    else downUntil[path] = Date.now() + (code >= 500 ? DOWN_MS.server : DOWN_MS.refused);
+    lastError = (code ? 'HTTP ' + code : 'nem érhető el') + ' (' + path.slice(1) + ')';
+    return null;
+  }
 }
-export const recognize = (dataUrl) => safe('/recognize', { image: dataUrl }, 50000);
-export const name = (hu, de) => safe('/name', { hu, de }, 35000);
+export const recognize = (dataUrl) => safe('/recognize', { image: dataUrl }, 75000);
+export const name = (hu, de) => safe('/name', { hu, de }, 55000);
 export async function status() {
   if (!cfg.token) return 'nincs beállítva';
   if (!navigator.onLine) return 'net nélkül nem elérhető';
-  downUntil = 0;
+  downUntil = { all: 0 };
   return (await safe('/health', null, 12000))?.ok ? 'elérhető' : 'a gép most nem érhető el';
 }
