@@ -602,7 +602,9 @@ const offerKey = (it) => [it.hu || '', it.de || '', it.brand || '', it.barcode |
 const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (!it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
   (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3) ||
   // no price yet: ask again after an hour (the machine may have found one since; Tomi 11000)
-  (!it.offer.price && Date.now() - (it.offer.at || 0) > 3600e3)) &&
+  (!it.offer.price && Date.now() - (it.offer.at || 0) > 3600e3) ||
+  // Aldi Nord is not Tomi's shop (Neunburg has an ALDI SÜD): such older answers are asked again
+  ((it.offer.price?.store === 'Aldi Nord' || it.offer.link?.store === 'Aldi Nord') && Date.now() - (it.offer.at || 0) > 3600e3)) &&
   Date.now() - (it.offerAsked || 0) > OFFER_POLL_MS;
 let offering = false;
 async function kickOffers() {
