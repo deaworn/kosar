@@ -5,7 +5,7 @@
 // next to the SAME product page; a different page without a picture does not
 // replace the earlier page that had one (a picture must belong to its link).
 export function mergeOffer(prev, key, r, now = Date.now()) {
-  const next = { key, at: now, checked: r.checked, link: r.link || null, price: r.price || null, alt: r.alt || null };
+  const next = { key, at: now, checked: r.checked, link: r.link || null, price: r.price || null, alt: r.alt || null, notSold: Array.isArray(r.notSold) ? r.notSold.slice(0, 3) : [] };
   const old = prev && prev.key === key && prev.link?.image ? prev.link : null;
   if (old && !next.link?.image) next.link = next.link && next.link.url === old.url ? { ...next.link, image: old.image } : { ...old };
   return next;
