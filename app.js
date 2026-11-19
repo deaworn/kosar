@@ -7,6 +7,7 @@ import { splitBrand } from './dictionary.js';
 import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
+import { mergeOffer } from './offer-merge.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -592,7 +593,7 @@ async function kickOffers() {
       if (!r) break; // machine not reachable: try again later
       if (r.pending) { persist(); continue; }
       const now = items[it.id]; if (!now) continue;
-      now.offer = { key: offerKey(now), at: Date.now(), checked: r.checked, link: r.link || null, price: r.price || null };
+      now.offer = mergeOffer(now.offer, offerKey(now), r);
       persist(); render();
     }
   } finally { offering = false; }
