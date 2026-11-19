@@ -8,6 +8,7 @@ import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, da
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
 import { mergeOffer } from './offer-merge.js';
+import { nameCheck } from './name-check.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -226,6 +227,8 @@ function metaHtml(it) {
   if (brand) parts.push(esc(brand));
   if (it.myPrice) parts.push('<span class="price">' + esc(priceText(it.myPrice)) + '</span> <span class="tag">saját</span>');
   else if (it.offer?.price) parts.push('<span class="price">' + esc(priceText(it.offer.price)) + '</span>');
+  // Tomi's REWE price stays the main one; a cheaper verified shop is a note next to it
+  if (!it.myPrice && it.offer?.price && it.offer?.alt) parts.push('<span class="note">olcsóbb: ' + esc(it.offer.alt.store + ' ' + eur(it.offer.alt.value)) + '</span>');
   else if (it.offer) parts.push('<span class="noprice">ár: nem találtam</span>');
   return parts.length ? '<div class="meta">' + parts.join(' · ') + '</div>' : '';
 }
@@ -234,7 +237,14 @@ function rowHtml(it) {
   const av = it.enrich?.autoVals || {};
   // Dictionary translations are reliable ("auto"); machine translations are a guess ("tipp?").
   const dict = it.enrich?.sources?.translation === 'szótár';
-  const autoTag = (f) => (it[f] && av[f] === it[f] ? '<span class="tag' + (dict ? '' : ' est') + '">' + (dict ? 'auto' : 'tipp?') + '</span>' : '');
+  // an auto-filled German name is checked against the verified shop product (Tomi 10990/10993)
+  const nc = it.de && av.de === it.de ? nameCheck(it.de, it.offer) : { state: 'unchecked' };
+  const autoTag = (f) => {
+    if (!(it[f] && av[f] === it[f])) return '';
+    if (f === 'de' && nc.state === 'ok') return '<span class="tag">✓ bolti név</span>';
+    if (f === 'de' && nc.state === 'differs') return '<span class="tag est">ellenőrizd</span>';
+    return '<span class="tag' + (dict ? '' : ' est') + '">' + (dict ? 'auto' : 'tipp?') + '</span>';
+  };
   const g = GROUP_LABEL[it.group || 'kell'] ? '<span class="tag">' + GROUP_LABEL[it.group] + '</span>' : '';
   return '<div class="item' + (it.done ? ' done' : '') + '">' +
     '<button type="button" class="chk" data-act="toggle" aria-pressed="' + !!it.done + '" aria-label="' + esc(it.hu || it.de || 'fotós tétel') + ' kipipálása"><span class="box">' + CHECK + '</span></button>' +
@@ -364,6 +374,10 @@ function openEditor(id, d = null) {
   if (of?.price) lines.push('Ár: <b>' + esc(priceText(of.price)) + '</b>' + (of.price.base ? ' · ' + esc(of.price.base) : '') + ' <span class="note">(a bolti oldalról, ' + esc(of.price.date) + ')</span>');
   else if (of) lines.push('Ár: nem találtam <span class="note">(ellenőrizve ' + esc(String(of.checked || '').slice(0, 10)) + ')</span>');
   if (of?.link && safeUrl(of.link.url)) lines.push('<a href="' + esc(of.link.url) + '" target="_blank" rel="noopener noreferrer">Termékoldal: ' + esc(of.link.store) + '</a> <span class="note">(ellenőrzött)</span>');
+  if (of?.price && of?.alt) lines.push('Olcsóbb máshol: ' + (safeUrl(of.alt.url) ? '<a href="' + esc(of.alt.url) + '" target="_blank" rel="noopener noreferrer">' + esc(priceText(of.alt)) + '</a>' : esc(priceText(of.alt))) + ' <span class="note">(bolti oldal)</span>');
+  const nameAuto = id && it.de && it.enrich?.autoVals?.de === it.de;
+  if (nameAuto) { const nc = nameCheck(it.de, of); if (nc.state === 'ok') lines.push('Német név: egyezik a bolti termékkel <span class="note">(' + esc(nc.store) + ')</span>');
+    else if (nc.state === 'differs') lines.push('Német név: <span class="est">eltér a bolti terméktől</span>, a boltban: <b>' + esc(nc.name) + '</b> <span class="note">(javítsd, ha kell)</span>'); }
   if (e.sources?.translation) lines.push('Fordítás forrása: ' + esc(e.sources.translation));
   if (link) lines.push('<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + esc(e.link.label || 'link') + '</a> <span class="est">(' + esc(e.link.source) + ')</span>');
   $('edHint').innerHTML = lines.length ? '<div class="h">Részletek</div>' + lines.join('<br>') +
@@ -580,7 +594,9 @@ async function kickRecognize() {
 const OFFER_TTL = 3 * 864e5, OFFER_POLL_MS = 60000;
 const offerKey = (it) => [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase();
 const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (!it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
-  (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3)) &&
+  (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3) ||
+  // no price yet: ask again after an hour (the machine may have found one since; Tomi 11000)
+  (!it.offer.price && Date.now() - (it.offer.at || 0) > 3600e3)) &&
   Date.now() - (it.offerAsked || 0) > OFFER_POLL_MS;
 let offering = false;
 async function kickOffers() {
