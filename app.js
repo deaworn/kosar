@@ -13,6 +13,7 @@ import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
+import { activeCandidates, candidateTitle, candidateUnitInfo, pickCandidate, sortCandidates } from './candidates.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -160,6 +161,7 @@ function pics(it) {
   // picture may show a different product (measured: "Bacon" showed a margarine)
   const p = it.enrich?.photo, small = /vonalkód/.test(p?.source || '') ? safeUrl(p?.url) : '';
   if (small) return { small, big: safeUrl(p.big) || small, own: false };
+  if (activeCandidates(it).length) return null; // unpicked generic item: the picture comes when one is picked
   const img = safeUrl(it.offer?.link?.image); // the verified store page's product image
   return img ? { small: img, big: img, own: false } : null;
 }
@@ -230,7 +232,9 @@ function priceText(p, own = false) { return (p.store ? p.store + (p.online ? ' (
 // the cheapest online pharmacy next to the main price, when it is another page (round 11)
 const pharmacyNote = (of) => of?.pharmacy && of.price && of.pharmacy.url !== of.price.url ? of.pharmacy : null;
 function metaHtml(it) {
-  const e = it.enrich || {}, parts = [];
+  const cs = activeCandidates(it);
+  if (cs.length) return '<div class="meta"><span class="note">' + cs.length + ' ajánlat egységár szerint – koppints a választáshoz:</span></div>';
+  const parts = [];
   // a brand only when certain: typed, from the barcode/Claude, or from the verified store page
   const brand = it.brand || it.offer?.link?.brand || '';
   if (brand) parts.push(esc(brand));
@@ -251,12 +255,26 @@ function metaHtml(it) {
   return parts.length ? '<div class="meta">' + parts.join(' · ') + '</div>' : '';
 }
 
+function chooserHtml(it) {
+  const cs = activeCandidates(it);
+  if (!cs.length) return '';
+  return '<div class="chooser" role="group" aria-label="Termékválasztó">' + cs.map((c, i) => {
+    const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
+    const st = c.store + (c.online ? ' (online)' : '');
+    const sub = candidateUnitInfo(c);
+    return '<button type="button" class="cand" data-act="pick" data-i="' + i + '">' + img +
+      '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(st) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
+      (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
+      '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
+  }).join('') + '</div>';
+}
+
 function rowHtml(it) {
   const av = it.enrich?.autoVals || {};
   // Dictionary translations are reliable ("auto"); machine translations are a guess ("tipp?").
   const dict = it.enrich?.sources?.translation === 'szótár';
   // an auto-filled German name is checked against the verified shop product (Tomi 10990/10993)
-  const nc = it.de && av.de === it.de ? nameCheck(it.de, it.offer) : { state: 'unchecked' };
+  const nc = it.de && av.de === it.de && !activeCandidates(it).length ? nameCheck(it.de, it.offer) : { state: 'unchecked' };
   const autoTag = (f) => {
     if (!(it[f] && av[f] === it[f])) return '';
     if (f === 'de' && nc.state === 'ok') return '<span class="tag">✓ bolti név</span>';
@@ -272,7 +290,7 @@ function rowHtml(it) {
     '<span class="names"><div class="hu">' + (it.hu || it.de ? esc(it.hu || it.de) + autoTag(it.hu ? 'hu' : 'de')
       : it.recog === 'failed' ? '<span class="est">Nem ismertem fel: koppints, írd be</span>' : '<span class="est">Felismerésre vár…</span>') + g + '</div>' +
     (it.hu && it.de ? '<div class="de">' + esc(it.de) + autoTag('de') + '</div>' : '') + metaHtml(it) + '</span>' +
-    (it.qty ? '<span class="qty">' + esc(it.qty) + '</span>' : '') + '</button></div>';
+    (it.qty ? '<span class="qty">' + esc(it.qty) + '</span>' : '') + '</button></div>' + chooserHtml(it);
 }
 
 // Bring a just-added item into view (new items sort to the end of their section).
@@ -313,7 +331,13 @@ $('list').addEventListener('click', (ev) => {
   if (!it) return;
   if (btn.dataset.act === 'toggle') edit(id, { done: !it.done });
   else if (btn.dataset.act === 'zoom') openZoom(pics(it));
-  else openEditor(id);
+  else if (btn.dataset.act === 'pick') {
+    const c = activeCandidates(it)[Number(btn.dataset.i)];
+    if (c && pickCandidate(it, c, learned(), BRAND_KEYS)) {
+      persist(); render();
+      setStatus('Kiválasztva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
+    }
+  } else openEditor(id);
 });
 
 // ---- zoom (full screen picture; closes on tap or the back button) ----------------
@@ -398,6 +422,8 @@ function openEditor(id, d = null) {
   if (id && it.recogSrc) lines.push('Felismerés: ' + esc(it.recogSrc) + ' <span class="est">(javaslat, javítható)</span>');
   if (id && it.alts?.length) lines.push('Más javaslat: ' + it.alts.map((c, i) => '<button type="button" class="ghost take alt" data-i="' + i + '">' + esc(c.hu || c.de) + (c.brand ? ' · ' + esc(c.brand) : '') + '</button>').join(' '));
   const of = id ? it.offer : null;
+  const edCands = of?.candidates?.length ? sortCandidates(of.candidates) : [];
+  if (edCands.length) lines.push('Bolti ajánlatok (egységár szerint): ' + edCands.map((c, i) => '<button type="button" class="ghost take candpick" data-i="' + i + '">' + esc(c.store + ': ' + candidateTitle(c) + ' · ' + eur(c.price) + (c.unitPriceText ? ' (' + c.unitPriceText + ')' : '')) + '</button>').join(' '));
   if (of?.price) lines.push('Ár: <b>' + esc(priceText(of.price)) + '</b>' + (of.price.base ? ' · ' + esc(of.price.base) : '') + ' <span class="note">(a bolti oldalról, ' + esc(of.price.date) + ')</span>');
   else if (of) lines.push('Ár: nem találtam <span class="note">(ellenőrizve ' + esc(String(of.checked || '').slice(0, 10)) + ')</span>');
   for (const st of of?.notSold || []) lines.push(esc(st) + ': <span class="est">online nem mutat árat</span> <span class="note">(a boltban lehet, hogy kapható)</span>');
@@ -414,6 +440,15 @@ function openEditor(id, d = null) {
     '' : '';
   for (const b of $('edHint').querySelectorAll('button.alt')) {
     b.onclick = () => { const c = it.alts[Number(b.dataset.i)]; $('edHu').value = c.hu || ''; $('edDe').value = c.de || ''; $('edBrand').value = c.brand || ''; };
+  }
+  for (const b of $('edHint').querySelectorAll('button.candpick')) {
+    b.onclick = () => {
+      const c = edCands[Number(b.dataset.i)];
+      if (id && c && pickCandidate(it, c, learned(), BRAND_KEYS)) {
+        persist(); render(); $('editor').close();
+        setStatus('Kiválasztva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
+      }
+    };
   }
   if (d?.photoBlob) edPhoto = d.photoBlob;
   showEdPhoto(id);
@@ -652,7 +687,7 @@ async function kickOffers() {
       const now = items[it.id]; if (!now) continue;
       now.offer = mergeOffer(now.offer, offerKey(now), r);
       delete now.offerForce;
-      relabel(now); // the verified shop page names the brand: take it out of the name
+      if (!activeCandidates(now).length) relabel(now); // the verified shop page names the brand: take it out of the name (once a single product is chosen)
       persist(); render(); refreshTick();
     }
   } finally {

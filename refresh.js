@@ -19,8 +19,10 @@ const brandNamed = (it) => !!it.brand && String(it.hu || '').toLowerCase().inclu
 export function missingParts(it, hasPic) {
   const out = [];
   if (!it.de && !brandNamed(it)) out.push('német név');
-  if (!hasPic(it)) out.push('kép');
-  if (!(it.offer?.price || it.myPrice || chosenVariant(it))) out.push('ár'); // a chosen pack size is a price
+  const candPic = Array.isArray(it.offer?.candidates) && it.offer.candidates.some((c) => c?.image);
+  const candPrice = Array.isArray(it.offer?.candidates) && it.offer.candidates.some((c) => c?.price > 0);
+  if (!hasPic(it) && !candPic) out.push('kép');
+  if (!(it.offer?.price || it.myPrice || chosenVariant(it) || candPrice)) out.push('ár'); // a chosen pack size or candidate list is a price
   return out;
 }
 

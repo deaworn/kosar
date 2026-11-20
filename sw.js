@@ -2,10 +2,10 @@
 // picks up new versions next time. Other origins (translation, Open Food Facts)
 // pass through untouched, except product photos, which are cached cache-first
 // so they also show offline.
-const SHELL = 'kosar-shell-v23';
+const SHELL = 'kosar-shell-v24';
 const SHARE = 'kosar-share';
 const IMG = 'kosar-img-v1';
-const ASSETS = ['./', 'index.html', 'app.js', 'enrich.js', 'dictionary.js', 'photos.js', 'scanner.js', 'ai.js', 'offer-merge.js', 'name-check.js', 'brand.js', 'refresh.js', 'lang.js', 'variants.js', 'units.js', 'style.css', 'manifest.webmanifest',
+const ASSETS = ['./', 'index.html', 'app.js', 'enrich.js', 'dictionary.js', 'photos.js', 'scanner.js', 'ai.js', 'offer-merge.js', 'name-check.js', 'brand.js', 'refresh.js', 'lang.js', 'variants.js', 'units.js', 'candidates.js', 'style.css', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 
 self.addEventListener('install', (e) => {

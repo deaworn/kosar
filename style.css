@@ -158,3 +158,16 @@ dialog .edbtns{position:sticky;bottom:calc(-18px - env(safe-area-inset-bottom, 0
 .hrow .names{display:grid;flex:1;min-width:0}
 .hrow .ico{width:40px;height:40px}
 .hrow .ico img{opacity:1;background:#fff}
+
+/* compact candidate chooser on generic items (Tomi 11199 + 11240: options sorted by unit price and store) */
+.chooser{display:grid;gap:4px;margin:-4px 0 2px;padding:6px 8px 8px;background:var(--card);border:1px solid var(--line);border-top:0;border-radius:0 0 14px 14px}
+li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:0}
+.cand{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:7px 10px;color:var(--ink);font:inherit;font-size:.8rem;cursor:pointer;transition:border-color .15s,background .15s}
+.cand:hover,.cand:focus-visible{border-color:var(--accent);background:var(--tint);outline:none}
+.cpic{width:30px;height:30px;flex:none;border-radius:7px;object-fit:cover;background:#fff}
+.cmain{flex:1;min-width:0;display:grid;gap:1px}
+.ctop{display:flex;align-items:baseline;gap:6px;min-width:0}
+.cstore{flex:none;color:var(--accent);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em}
+.cname{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.csub{color:var(--muted);font-family:var(--f-mono);font-size:.72rem}
+.cprice{flex:none;color:var(--accent);font-family:var(--f-mono);font-weight:700;font-size:.86rem}
