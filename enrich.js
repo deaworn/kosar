@@ -8,6 +8,7 @@
 import { lookup } from './dictionary.js';
 
 const norm = (s) => String(s || '').toLowerCase().normalize('NFC').trim();
+const fold = (s) => norm(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 export const enrichKey = (hu, de) => norm(hu) + '|' + norm(de);
 
 async function getJson(url, ms) {
@@ -59,7 +60,7 @@ export async function lookupBarcode(code) {
 // overwritten. When a translation cannot run (offline), the old auto value stays.
 // Returns { patch, complete }; complete=false means a network step failed and
 // the item should be retried later.
-export async function enrich(it, { online = navigator.onLine, aiName = null } = {}) {
+export async function enrich(it, { online = navigator.onLine, aiName = null, aiNameAny = null } = {}) {
   const prevAuto = it.enrich?.autoVals || {};
   const cur = { hu: (it.hu || '').trim(), de: (it.de || '').trim() };
   const user = { hu: cur.hu !== prevAuto.hu ? cur.hu : '', de: cur.de !== prevAuto.de ? cur.de : '' };
@@ -68,8 +69,31 @@ export async function enrich(it, { online = navigator.onLine, aiName = null } = 
   const patch = {};
   let complete = true;
 
+  // One input field (Tomi 11205): the typed language was not clear on the phone (site/lang.js),
+  // so it sits in the Hungarian field with langCheck. Claude tells the language and both names.
+  if (it.langCheck && user.hu && !user.de && online && aiNameAny) {
+    try {
+      const a = await aiNameAny(user.hu);
+      if (a?.lang) {
+        patch.langCheck = false;
+        if (a.brand && !it.brand) info.brand = { value: String(a.brand).slice(0, 40), estimate: true, source: 'Claude (gép)' };
+        const typed = user.hu, ah = String(a.hu || '').trim().slice(0, 80), ad = String(a.de || '').trim().slice(0, 80);
+        if (a.lang === 'de') {
+          patch.de = typed; user.de = typed; user.hu = ''; // it was German: it moves to the German field
+          patch.hu = ah && norm(ah) !== norm(typed) ? ah : '';
+          if (patch.hu) { info.autoVals.hu = patch.hu; info.sources.translation = 'Claude (gép)'; } else delete patch.hu;
+        } else {
+          // Hungarian typed without accents ("kenyer"): Claude's spelling, the same word
+          if (ah && ah !== typed && fold(ah) === fold(typed)) { patch.hu = ah; user.hu = ah; }
+          if (ad && norm(ad) !== norm(typed)) { patch.de = ad; info.autoVals.de = ad; info.sources.translation = 'Claude (gép)'; }
+        }
+      }
+    } catch { /* not reachable: the item stays Hungarian for now and is asked again later */ }
+    if (patch.langCheck !== false) complete = false;
+  }
+
   for (const [f, from, other] of [['de', 'hu', 'de'], ['hu', 'de', 'hu']]) {
-    if (user[f] || !user[from]) continue; // this language was typed, or there is nothing to translate from
+    if (user[f] || !user[from] || patch[f]) continue; // this language was typed (or just filled), or there is nothing to translate from
     // 0. dictionary, exact match only
     const hit = lookup(user[from], from);
     let val = hit && norm(hit[from === 'hu' ? 0 : 1]) === norm(user[from]) ? hit[f === 'de' ? 1 : 0] : '';

@@ -80,7 +80,7 @@ html,body{overscroll-behavior-y:contain}
 @keyframes ptrspin{to{transform:rotate(360deg)}}
 .addbar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--bg);border-top:1px solid var(--line);
   padding:10px max(16px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px))}
-.addbar form{max-width:520px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr auto;gap:8px}
+.addbar form{max-width:520px;margin:0 auto;display:grid;grid-template-columns:1fr auto;gap:8px}
 input,select{min-width:0;width:100%;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;font:inherit;color:var(--ink)}
 input:focus,select:focus{outline:2px solid var(--accent);outline-offset:0}
 .addbar button{background:var(--accent);color:var(--accent-ink);border:0;border-radius:12px;padding:0 18px;font:inherit;font-size:1.3rem;font-weight:700;cursor:pointer}
@@ -111,7 +111,7 @@ textarea{width:100%;margin-top:4px;background:var(--bg);border:1px solid var(--l
 .imlist{margin:6px 0 0;padding-left:18px;max-height:40vh;overflow:auto;color:var(--ink)}
 .imlist .d{color:var(--muted);text-decoration:line-through}
 
-.addbar form{grid-template-columns:1fr 1fr auto auto}
+.addbar form{grid-template-columns:1fr auto auto}
 .addbar .scanbtn{background:var(--card);border:1px solid var(--line);color:var(--accent);padding:0 11px;display:grid;place-items:center}
 .scanbtn svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round}
 .icobtn{flex:none;background:none;border:0;padding:0 12px 0 0;display:grid;place-items:center;cursor:pointer;color:inherit}

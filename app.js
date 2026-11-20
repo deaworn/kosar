@@ -8,6 +8,7 @@ import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, da
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
 import { selectMissing } from './refresh.js';
+import { guessLang } from './lang.js';
 import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
@@ -188,7 +189,7 @@ async function kickEnrich() {
       const before = { hu: it.hu, de: it.de };
       let res = null;
       try {
-        res = quick ? await enrich(it, { online: false }) : await enrich(it, { online: navigator.onLine, aiName: ai.configured() ? ai.name : null });
+        res = quick ? await enrich(it, { online: false }) : await enrich(it, { online: navigator.onLine, aiName: ai.configured() ? ai.name : null, aiNameAny: ai.configured() ? ai.nameAny : null });
         if (res && quick && !res.complete) res.patch.enrich.quick = true; // the network pass still has to run
       } catch { res = null; }
       const now = items[it.id];
@@ -331,7 +332,7 @@ window.addEventListener('popstate', () => { if (!$('zoom').hidden) closeZoom(); 
 // ---- add ----------------------------------------------------------------------
 // Typing suggests earlier (deleted) items; one tap brings one back with everything.
 function suggest() {
-  const q = ($('inHu').value || $('inDe').value).trim().toLowerCase();
+  const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
   if (q.length < 2) { box.hidden = true; return; }
   const hits = Object.entries(hist).filter(([, h]) => ((h.hu || '') + ' ' + (h.de || '') + ' ' + (h.brand || '')).toLowerCase().includes(q))
@@ -339,10 +340,10 @@ function suggest() {
   box.innerHTML = hits.map(([id, h]) => '<button type="button" class="sug" data-id="' + esc(id) + '"><b>' + esc(h.hu || h.de) + '</b><span>' + esc([h.de && h.hu ? h.de : '', h.brand].filter(Boolean).join(' · ')) + '</span><i>korábbi</i></button>').join('');
   box.hidden = !hits.length;
 }
-$('inHu').addEventListener('input', suggest); $('inDe').addEventListener('input', suggest);
+$('inName').addEventListener('input', suggest);
 $('suggest').addEventListener('click', (ev) => {
   const b = ev.target.closest('button.sug'); if (!b) return;
-  restore(b.dataset.id); $('inHu').value = ''; $('inDe').value = ''; $('suggest').hidden = true;
+  restore(b.dataset.id); $('inName').value = ''; $('suggest').hidden = true;
 });
 function openHistory() {
   if ($('menu').open) $('menu').close();
@@ -359,13 +360,17 @@ $('hiClose').addEventListener('click', () => $('history').close());
 
 $('addForm').addEventListener('submit', (e) => {
   e.preventDefault();
-  const hu = $('inHu').value.trim(), de = $('inDe').value.trim();
-  if (!hu && !de) { $('inHu').focus(); return; }
-  const r = applyBrand({ hu, de, qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
+  // one field, any language (Tomi 11205): the brand comes off first, then the language is told
+  // apart (site/lang.js); when the phone is not sure, the home machine decides (langCheck)
+  const text = $('inName').value.trim();
+  if (!text) { $('inName').focus(); return; }
+  const r = applyBrand({ hu: text, de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
+  const lang = guessLang(r.hu);
+  if (lang === 'de') { r.de = r.hu; r.hu = ''; } else if (!lang) r.langCheck = true;
   const nid = uid(); edit(nid, r); reveal(nid);
-  $('inHu').value = ''; $('inDe').value = ''; $('suggest').hidden = true;
+  $('inName').value = ''; $('suggest').hidden = true;
   setStatus('Felírva: ' + (r.hu || r.de) + (r.brand ? ' (márka: ' + r.brand + ')' : '') + (navigator.onLine ? '' : ' (a német név és a fotó netre vár)'));
-  $('inHu').focus();
+  $('inName').focus();
 });
 
 // ---- editor -----------------------------------------------------------------

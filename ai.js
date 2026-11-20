@@ -72,6 +72,8 @@ async function safe(path, body, timeoutMs) {
 }
 export const recognize = (dataUrl) => safe('/recognize', { image: dataUrl }, 75000);
 export const name = (hu, de) => safe('/name', { hu, de }, 55000);
+// one input field (Tomi 11205): the language is not known yet; the answer says it (lang: 'hu' | 'de')
+export const nameAny = (text) => safe('/name', { text }, 55000);
 // Verified link + store price. Returns the result, { pending: true } while the machine searches, or null.
 // refresh: the pull-down asked again (the machine re-searches an older answer without a price)
 export async function offer(it, { refresh = false } = {}) {
