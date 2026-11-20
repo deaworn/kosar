@@ -36,61 +36,86 @@ export function isGeneric(item, learned = []) {
 export const genericItem = isGeneric;
 
 // Pack size from a product title when not given separately ("Bauernbrot 500g" -> "500 g").
+// Weight or volume always wins over a piece count when both appear ("Vitaminbrot (5 Stück), 250 g" -> "250 g").
 export function packFromText(text) {
   const t = String(text || '').replace(/\u00a0/g, ' ').replace(/(\d)\s*(?:×|à|á|\ba\b)\s*(\d)/gi, '$1x$2');
-  const per = t.match(/\b(?:je|pro|per)\s+(kg|kilo|stück|stk|st|100\s?g|liter|l)\b/i);
-  if (per) return '1 ' + per[1].replace(/^kilo$/i, 'kg').replace(/^(stück|stk|st)$/i, 'Stück').replace(/^liter$/i, 'l');
-  const size = t.match(/(?:^|[\s,(])((?:\d+\s?x\s?)?\d+(?:[.,]\d+)?)\s?(kg|g|ml|cl|l|stück|stk|st|db|tabs|caps|blatt|rollen)\b/i);
-  if (size) return (size[1].replace(/\s+/g, '') + ' ' + size[2]).replace(/ (stück|stk|st)$/i, ' Stück');
+  const perWv = t.match(/\b(?:je|pro|per)\s+(kg|kilo|100\s?g|liter|l)\b/i);
+  if (perWv) return '1 ' + perWv[1].replace(/^kilo$/i, 'kg').replace(/^liter$/i, 'l');
+  const wv = t.match(/(?:^|[\s,(])((?:\d+\s?x\s?)?\d+(?:[.,]\d+)?)\s?(kg|g|ml|cl|l)(?!\s*=)\b/i);
+  if (wv) return wv[1].replace(/\s+/g, '') + ' ' + wv[2];
+  const perPc = t.match(/\b(?:je|pro|per)\s+(stück|stk|st)\b/i);
+  if (perPc) return '1 Stück';
+  const pc = t.match(/(?:^|[\s,(])((?:\d+\s?x\s?)?\d+(?:[.,]\d+)?)\s?(stück|stk|st|db|tabs|caps|blatt|rollen)\b/i);
+  if (pc) return (pc[1].replace(/\s+/g, '') + ' ' + pc[2]).replace(/ (stück|stk|st)$/i, ' Stück');
   return '';
+}
+
+const WV_UNITS = 'kg|g|l|liter|ml|cl';
+const PC_UNITS = 'stück|stueck|stk|st|db|tabs|caps|blatt|rollen';
+const hasWeightOrVol = (s) => /(?:^|[\s,(\d])(kg|g|l|liter|ml|cl)\b/i.test(String(s || ''));
+
+function unitPriceFromPack(val, raw, unitsPattern) {
+  const u = String(raw || '').replace(/\u00a0/g, ' ').replace(/-?(stück|stk|st)(-packung)?\b/gi, ' Stück')
+    .replace(/(\d)\s*(?:×|x|à|á|\ba\b)\s*(\d)/gi, '$1x$2').replace(/,/g, '.').replace(/\s+/g, ' ').trim();
+  if (!u) return null;
+  const exact = u.match(new RegExp('^(?:(\\d+)\\s*x\\s*)?(\\d+(?:\\.\\d+)?)?\\s*(' + unitsPattern + ')\\.?$', 'i'));
+  const embed = !exact && u.match(new RegExp('(?:^|[\\s,(])(?:(\\d+)\\s*x\\s*)?(\\d+(?:\\.\\d+)?)\\s*(' + unitsPattern + ')(?!\\s*=)\\b', 'i'));
+  const m = exact || embed;
+  if (!m) return null;
+  const mult = m[1] ? Number(m[1]) : 1;
+  const num = m[2] ? Number(m[2]) : 1;
+  const total = mult * num;
+  const kind = m[3].toLowerCase();
+  if (!(total > 0)) return null;
+  let amount = total, base = 'db';
+  if (kind === 'kg') { amount = total; base = 'kg'; }
+  else if (kind === 'g') { amount = total / 1000; base = 'kg'; }
+  else if (kind === 'l' || kind === 'liter') { amount = total; base = 'l'; }
+  else if (kind === 'ml') { amount = total / 1000; base = 'l'; }
+  else if (kind === 'cl') { amount = total / 100; base = 'l'; }
+  const value = Math.round((val / amount) * 100) / 100;
+  return { value, unit: base, text: value.toFixed(2).replace('.', ',') + ' € / ' + base };
+}
+
+function unitPriceFromBase(rawB, unitsPattern) {
+  if (!rawB) return null;
+  const b = String(rawB).replace(/\u00a0/g, ' ').replace(/,/g, '.');
+  const eq = b.match(new RegExp('(?:^|\\b)(100|1)\\s*(' + unitsPattern + ')\\s*=\\s*(\\d+(?:\\.\\d{1,2})?)', 'i'));
+  const sl = !eq && b.match(new RegExp('(\\d+(?:\\.\\d{1,2})?)\\s*(?:€|eur)?\\s*\\/\\s*(100|1)?\\s*(' + unitsPattern + ')\\b', 'i'));
+  const qty = eq ? Number(eq[1]) : sl ? Number(sl[2] || 1) : 0;
+  const kind = (eq ? eq[2] : sl ? sl[3] : '').toLowerCase();
+  const ref = eq ? Number(eq[3]) : sl ? Number(sl[1]) : 0;
+  if (!(ref > 0 && qty > 0)) return null;
+  let factor = 1 / qty, base = 'db';
+  if (kind === 'kg') { factor = 1 / qty; base = 'kg'; }
+  else if (kind === 'g') { factor = 1000 / qty; base = 'kg'; }
+  else if (kind === 'l' || kind === 'liter') { factor = 1 / qty; base = 'l'; }
+  else if (kind === 'ml') { factor = 1000 / qty; base = 'l'; }
+  else if (kind === 'cl') { factor = 100 / qty; base = 'l'; }
+  const value = Math.round(ref * factor * 100) / 100;
+  return { value, unit: base, text: value.toFixed(2).replace('.', ',') + ' € / ' + base };
 }
 
 // Normalises (price, unit, basePriceText) into a unit price per kg, per l, or per piece (db):
 //   calcUnitPrice(1.19, '500 g') -> { value: 2.38, unit: 'kg', text: '2,38 € / kg' }
+// When a weight or volume is present (g/kg/ml/cl/l), ALWAYS uses €/kg or €/l even if a piece count is also present.
 export function calcUnitPrice(priceOrObj, unitStr = '', baseStr = '') {
   const isObj = priceOrObj && typeof priceOrObj === 'object';
   const val = Number(isObj ? (priceOrObj.value ?? priceOrObj.price) : priceOrObj);
   if (!(val > 0 && Number.isFinite(val))) return null;
-  const rawU = String(isObj ? (unitStr || priceOrObj.unit || '') : (unitStr || '')).trim();
+  const rawU = String(isObj ? ([unitStr, priceOrObj.unit, priceOrObj.name].filter(Boolean).join(' ')) : (unitStr || '')).trim();
   const rawB = String(isObj ? (baseStr || priceOrObj.base || '') : (baseStr || '')).trim();
-  const u = rawU.replace(/\u00a0/g, ' ').replace(/-?(stück|stk|st)(-packung)?$/i, ' Stück')
-    .replace(/(\d)\s*(?:×|x|à|á|\ba\b)\s*(\d)/gi, '$1x$2').replace(',', '.').replace(/\s+/g, ' ').trim();
-  const m = u.match(/^(?:(\d+)\s*x\s*)?(\d+(?:\.\d+)?)?\s*(kg|g|l|liter|ml|cl|stück|stueck|stk|st|db|tabs|caps|blatt|rollen)\.?$/i);
-  if (m) {
-    const mult = m[1] ? Number(m[1]) : 1;
-    const num = m[2] ? Number(m[2]) : 1;
-    const total = mult * num;
-    const kind = m[3].toLowerCase();
-    if (total > 0) {
-      let amount = total, base = 'db';
-      if (kind === 'kg') { amount = total; base = 'kg'; }
-      else if (kind === 'g') { amount = total / 1000; base = 'kg'; }
-      else if (kind === 'l' || kind === 'liter') { amount = total; base = 'l'; }
-      else if (kind === 'ml') { amount = total / 1000; base = 'l'; }
-      else if (kind === 'cl') { amount = total / 100; base = 'l'; }
-      const value = Math.round((val / amount) * 100) / 100;
-      return { value, unit: base, text: value.toFixed(2).replace('.', ',') + ' € / ' + base };
-    }
-  }
-  if (rawB) {
-    const b = rawB.replace(/\u00a0/g, ' ').replace(',', '.');
-    const eq = b.match(/(?:^|\b)(100|1)\s*(kg|g|l|liter|ml|stück|stueck|stk|st|db)\s*=\s*(\d+(?:\.\d{1,2})?)/i);
-    const sl = !eq && b.match(/(\d+(?:\.\d{1,2})?)\s*(?:€|eur)?\s*\/\s*(100|1)?\s*(kg|g|l|liter|ml|stück|stueck|stk|st|db)\b/i);
-    const qty = eq ? Number(eq[1]) : sl ? Number(sl[2] || 1) : 0;
-    const kind = (eq ? eq[2] : sl ? sl[3] : '').toLowerCase();
-    const ref = eq ? Number(eq[3]) : sl ? Number(sl[1]) : 0;
-    if (ref > 0 && qty > 0) {
-      let factor = 1 / qty, base = 'db';
-      if (kind === 'kg') { factor = 1 / qty; base = 'kg'; }
-      else if (kind === 'g') { factor = 1000 / qty; base = 'kg'; }
-      else if (kind === 'l' || kind === 'liter') { factor = 1 / qty; base = 'l'; }
-      else if (kind === 'ml') { factor = 1000 / qty; base = 'l'; }
-      const value = Math.round(ref * factor * 100) / 100;
-      return { value, unit: base, text: value.toFixed(2).replace('.', ',') + ' € / ' + base };
-    }
-  }
-  return null;
+  return unitPriceFromPack(val, rawU, WV_UNITS)
+    || unitPriceFromBase(rawB, WV_UNITS)
+    || unitPriceFromPack(val, rawB, WV_UNITS)
+    || unitPriceFromPack(val, rawU, PC_UNITS)
+    || unitPriceFromBase(rawB, PC_UNITS)
+    || null;
 }
+
+// Clearly not the product itself, but a baking mix, dough, spice, flavouring, mould or container/accessory for it.
+const NON_PRODUCT = /(?<![a-zäöüß])([a-zäöüß]*backmischung|fertigmischung|mischung\s+zum\s+backen|[a-zäöüß]*teig|[a-zäöüß]*gew(?:ü|ue)rz(?:mischung|zubereitung)?|[a-zäöüß]*aroma|[a-zäöüß]*form(?:en)?|[a-zäöüß]*dose(?:n)?|brot(?:kasten|box|korb|beutel|topf|messer|schneider|backautomat)|back(?:pulver|hefe|mittel|zutat))(?![a-zäöüß])/i;
+export const isNonProduct = (name) => NON_PRODUCT.test(String(name || '').normalize('NFC'));
 
 // Turns a verified page result ({ link, price }) or a candidate object into a normalised candidate.
 export function toCandidate(v, learned = []) {
@@ -104,11 +129,14 @@ export function toCandidate(v, learned = []) {
   const url = String(p?.url || link.url || v.url || '').trim();
   const rawName = String(link.name || v.name || '').trim();
   const name = shopName(rawName) || rawName;
+  if (isNonProduct(rawName) || isNonProduct(name)) return null;
   let brand = String(link.brand || v.brand || '').trim();
   if (!brand && name) { const sb = splitBrand(name, learned); if (sb) brand = sb.brand; }
-  const unit = String(p?.unit ?? v.unit ?? '').trim() || packFromText(name);
+  const rawUnit = String(p?.unit ?? v.unit ?? '').trim();
+  const nameUnit = packFromText(name);
+  const unit = (!hasWeightOrVol(rawUnit) && hasWeightOrVol(nameUnit)) ? nameUnit : (packFromText(rawUnit) || rawUnit || nameUnit);
   const base = String(p?.base ?? v.base ?? '').trim();
-  const up = calcUnitPrice(priceVal, unit, base) || (Number(v.unitPrice) > 0 ? {
+  const up = calcUnitPrice(priceVal, unit + (name ? ' ' + name : ''), base) || (Number(v.unitPrice) > 0 ? {
     value: Math.round(Number(v.unitPrice) * 100) / 100,
     unit: String(v.unitBase || v.unitPriceUnit || '').trim(),
     text: String(v.unitPriceText || '').trim() || (Number(v.unitPrice).toFixed(2).replace('.', ',') + ' €' + (v.unitBase ? ' / ' + v.unitBase : '')),
@@ -132,21 +160,32 @@ export function toCandidate(v, learned = []) {
   };
 }
 
-// Candidates sorted by unit price ascending (cheapest per kg/l/piece first); ties broken by
-// total price ascending, then store and product name. Candidates without a unit price sort after
-// those with one, ordered by their total price.
+// Candidates sorted by the unit-price base most candidates share (usually €/kg), cheapest first;
+// never compares different bases. Candidates with another base or no unit price sort after them
+// by package price ascending, then store and product name.
 export function sortCandidates(candidates, learned = []) {
   if (!Array.isArray(candidates)) return [];
-  return candidates
-    .map((c) => toCandidate(c, learned))
-    .filter(Boolean)
-    .sort((a, b) => {
-      const ua = a.unitPrice != null ? a.unitPrice : Infinity;
-      const ub = b.unitPrice != null ? b.unitPrice : Infinity;
-      if (ua !== ub) return ua - ub;
-      if (a.price !== b.price) return a.price - b.price;
-      return a.store.localeCompare(b.store, 'de') || a.name.localeCompare(b.name, 'de');
-    });
+  const list = candidates.map((c) => toCandidate(c, learned)).filter(Boolean);
+  const counts = new Map();
+  for (const c of list) {
+    if (c.unitPrice != null && c.unitBase) counts.set(c.unitBase, (counts.get(c.unitBase) || 0) + 1);
+  }
+  const order = { kg: 3, l: 2, db: 1 };
+  let mainBase = '', bestCount = 0;
+  for (const [b, n] of counts) {
+    if (n > bestCount || (n === bestCount && (order[b] || 0) > (order[mainBase] || 0))) {
+      mainBase = b;
+      bestCount = n;
+    }
+  }
+  return list.sort((a, b) => {
+    const aMain = Boolean(mainBase && a.unitPrice != null && a.unitBase === mainBase);
+    const bMain = Boolean(mainBase && b.unitPrice != null && b.unitBase === mainBase);
+    if (aMain !== bMain) return aMain ? -1 : 1;
+    if (aMain && bMain && a.unitPrice !== b.unitPrice) return a.unitPrice - b.unitPrice;
+    if (a.price !== b.price) return a.price - b.price;
+    return a.store.localeCompare(b.store, 'de') || a.name.localeCompare(b.name, 'de');
+  });
 }
 
 // Deduplicates verified results and returns at most `max` (default 8) sorted by unit price.
