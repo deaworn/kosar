@@ -3,7 +3,7 @@
 // account. Online, items are enriched from free keyless sources (enrich.js);
 // offline that step silently waits and everything else works.
 import { enrich, enrichKey, lookupBarcode } from './enrich.js';
-import { splitBrand } from './dictionary.js';
+import { applyBrand as splitInto, moveBrand, learnBrands } from './brand.js';
 import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
@@ -36,7 +36,7 @@ const safeUrl = (u) => (/^https:\/\//i.test(String(u || '')) ? String(u) : '');
 
 // ---- persistence --------------------------------------------------------------
 // bv.items is the v1 key and stays the same, so an update keeps the existing list.
-const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 3;
+const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 4;
 let items = {}, savedAt = 0;
 try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
 let storageOk = true, durableTimer = null;
@@ -63,28 +63,14 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && dur
 navigator.storage?.persist?.().catch(() => {});
 
 // A brand typed into a name moves to the brand field ("Haribo tejes gumimaci"
-// -> brand Haribo, name "tejes gumimaci"). With a brand already set, only that
-// same brand is taken out of the names; a different brand is left alone.
-function applyBrand(r) {
-  for (const f of ['hu', 'de']) {
-    const s = splitBrand(r[f]);
-    if (!s) continue;
-    if (!r.brand) r.brand = s.brand;
-    if (s.brand.toLowerCase() === r.brand.toLowerCase()) r[f] = s.rest;
-  }
-  return r;
-}
-
-// Schema migration. v1 -> v2: brands are split out of names; v2 -> v3: again, with
-// the longer brand list (e.g. "Golden Toast"). Items, ids and done states are never dropped.
-(function migrate() {
-  let v = 1;
-  try { v = Number(localStorage.getItem(LS_SCHEMA)) || 1; } catch { /* storage blocked */ }
-  if (v >= SCHEMA) return;
-  for (const it of Object.values(items)) applyBrand(it);
-  persist();
-  try { localStorage.setItem(LS_SCHEMA, String(SCHEMA)); } catch { /* retried next start */ }
-})();
+// -> brand Haribo, name "tejes gumimaci"; Tomi 11092: "Dohány paramount" -> "Dohány",
+// brand Paramount). Known brands: the built-in list plus the ones learned from the
+// items (brand field, verified shop page). Unsure -> the name stays (site/brand.js).
+const learned = () => learnBrands([items, hist]);
+const applyBrand = (r) => splitInto(r, learned());
+const BRAND_KEYS = { offer: offerKey, enrich: enrichKey };
+// a stored item: the same, keeping its verified offer and automatic-name labels
+const relabel = (it) => moveBrand(it, learned(), BRAND_KEYS);
 
 function uid() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -101,6 +87,19 @@ function edit(id, patch) {
 const LS_HISTORY = 'bv.history', HISTORY_MAX = 200;
 let hist = {};
 try { hist = JSON.parse(localStorage.getItem(LS_HISTORY) || '{}') || {}; } catch { hist = {}; }
+// Schema migration. v1 -> v2: brands are split out of names; v2 -> v3: again, with
+// the longer brand list (e.g. "Golden Toast"); v3 -> v4: with brands learned from the
+// verified shop pages and the tobacco brands ("Dohány paramount").
+// Items, ids and done states are never dropped. Runs after hist is loaded (learned brands).
+(function migrate() {
+  let v = 1;
+  try { v = Number(localStorage.getItem(LS_SCHEMA)) || 1; } catch { /* storage blocked */ }
+  if (v >= SCHEMA) return;
+  for (const it of Object.values(items)) relabel(it);
+  persist();
+  try { localStorage.setItem(LS_SCHEMA, String(SCHEMA)); } catch { /* retried next start */ }
+})();
+
 function saveHistory() {
   const keys = Object.keys(hist).sort((a, b) => (hist[b].deletedAt || 0) - (hist[a].deletedAt || 0));
   for (const k of keys.slice(HISTORY_MAX)) { if (hist[k].photo) delPhoto(k).catch(() => {}); delete hist[k]; }
@@ -192,7 +191,7 @@ async function kickEnrich() {
       if (!now) continue; // deleted meanwhile
       if (now.hu !== before.hu || now.de !== before.de) continue; // edited meanwhile: run again on the new names
       if (!res) now.enrich = { key: enrichKey(now.hu, now.de), at: Date.now(), complete: true, autoVals: {}, sources: {} };
-      else Object.assign(now, res.patch);
+      else { Object.assign(now, res.patch); relabel(now); } // an automatic name may carry a brand
       persist(); render();
     }
   } finally { enriching = false; enrichCount = 0; setNet(); }
@@ -584,6 +583,7 @@ async function kickRecognize() {
       if (!now) continue; // deleted meanwhile
       if (now.hu || now.de) { delete patch.hu; delete patch.de; } // the user typed a name meanwhile: keep it
       Object.assign(now, patch);
+      relabel(now); // the photo/barcode name may carry the brand
       if (alts?.length) now.alts = alts;
       if (now.hu || now.de) now.recog = 'done';
       else if (now.aiDone && (!now.barcode || now.offDone)) now.recog = 'failed'; // Claude saw it, nothing else to try
@@ -598,7 +598,8 @@ async function kickRecognize() {
 // is this product, a price only if the shop page shows it. A search takes minutes,
 // so the machine answers "pending" first and the app asks again later.
 const OFFER_TTL = 3 * 864e5, OFFER_POLL_MS = 60000;
-const offerKey = (it) => [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase();
+// a function declaration: the start-up migration (above) already needs it
+function offerKey(it) { return [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase(); }
 const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (!it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
   (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3) ||
   // no price yet: ask again after an hour (the machine may have found one since; Tomi 11000)
@@ -618,6 +619,7 @@ async function kickOffers() {
       if (r.pending) { persist(); continue; }
       const now = items[it.id]; if (!now) continue;
       now.offer = mergeOffer(now.offer, offerKey(now), r);
+      relabel(now); // the verified shop page names the brand: take it out of the name
       persist(); render();
     }
   } finally { offering = false; }

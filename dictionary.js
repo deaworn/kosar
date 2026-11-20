@@ -89,22 +89,10 @@ export const BRANDS = [
   'Vanish', 'WC-Ente', 'Wagner', 'Rewe Beste Wahl', 'ja!', 'gut&günstig', 'K-Classic', 'Pöttyös', 'Túró Rudi', 'Sió', 'Pick',
   'Univer', 'Győri', 'Boci', 'Túrórudi', 'Golden Toast', 'Lieken', 'Harry', 'Mestemacher', 'Alnatura', 'Bio Company', 'Lorenz Snack-World',
   'Leerdammer', 'Bresso', 'Almette', 'Mövenpick', 'Valensina', 'Granini', 'Lipton', 'Ritter', 'Wasa', 'Ültje', 'Bauer', 'Exquisa', 'Weight Watchers',
+  'Griesson', 'Milram', 'Tulip', 'Mylos', 'Berchtesgadener Land', 'Domol', 'Landbeck',
+  // tobacco (Tomi 11092: "Dohány paramount")
+  'Paramount', 'Marlboro', 'Camel', 'Lucky Strike', 'Pall Mall', 'Chesterfield', 'Winston', 'Gauloises', 'L&M', 'JPS',
+  'Golden Virginia', 'Drum', 'Pueblo', 'American Spirit',
 ];
 
-const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const BRAND_RE = BRANDS.slice().sort((a, b) => b.length - a.length)
-  .map((b) => [b, new RegExp('(^|[\\s,(])' + esc(b) + '(?=$|[\\s,)])', 'i')]);
-
-// "Haribo tejes gumimaci" -> { brand: 'Haribo', rest: 'tejes gumimaci' }; null if no known brand.
-// A name that is only the brand ("Nutella") keeps its name and also gets the brand.
-export function splitBrand(text) {
-  const t = String(text || '').trim();
-  if (!t) return null;
-  for (const [b, re] of BRAND_RE) {
-    const m = t.match(re);
-    if (!m) continue;
-    const rest = (t.slice(0, m.index) + m[1] + t.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ').replace(/^[\s,-]+|[\s,-]+$/g, '');
-    return { brand: b, rest: rest || t };
-  }
-  return null;
-}
+// Splitting a brand out of a name: site/brand.js (also uses brands learned from the shop pages).
