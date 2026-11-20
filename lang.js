@@ -4,11 +4,17 @@
 // one of the two languages uses. When neither wins, the answer is '' (not sure): the item is
 // kept as Hungarian and the home machine's Claude decides (enrich.js, item.langCheck).
 // Pure: used by the app, tested in node.
-import { DICT } from './dictionary.js';
+import { DICT, ALIASES, fold } from './dictionary.js';
 
 const norm = (s) => String(s || '').toLowerCase().normalize('NFC').replace(/\s+/g, ' ').trim();
 const HU = new Map(), DE = new Map();
-for (const e of DICT) { if (e[0]) HU.set(norm(e[0]), 1); if (e[1]) DE.set(norm(e[1]), 1); }
+for (const e of DICT) {
+  if (e[0]) { HU.set(norm(e[0]), 1); HU.set(fold(e[0]), 1); }
+  if (e[1]) { DE.set(norm(e[1]), 1); DE.set(fold(e[1]), 1); }
+}
+for (const alias of Object.keys(ALIASES)) {
+  if (!DE.has(alias)) HU.set(alias, 1);
+}
 const HU_PARTS = [...HU.keys()].filter((k) => k.length >= 4 && !DE.has(k) && !k.includes(' '));
 const DE_PARTS = [...DE.keys()].filter((k) => k.length >= 4 && !HU.has(k) && !k.includes(' '));
 
@@ -20,8 +26,9 @@ const DE_SPELL = [/[äß]/, /sch|ch|ck|tz|pf|ph|qu|w/, /(ei|ie|eu|äu)/, /(ung|c
 export function guessLang(text) {
   const s = norm(text);
   if (!s) return '';
-  // 1. the dictionary, the whole text and then its words
-  const huWhole = HU.has(s), deWhole = DE.has(s);
+  // 1. the dictionary, the whole text and then its words (accent-insensitive)
+  const fs = fold(s);
+  const huWhole = HU.has(s) || HU.has(fs), deWhole = DE.has(s) || DE.has(fs);
   if (huWhole !== deWhole) return huWhole ? 'hu' : 'de';
   let hu = 0, de = 0;
   for (const w of s.split(' ')) {

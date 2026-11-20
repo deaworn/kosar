@@ -98,7 +98,7 @@ export async function offer(it, { refresh = false } = {}) {
   return r;
 }
 // Instant product candidates while typing from the server cache, or { pending: true } while searching.
-export const candidates = (text, { search = false } = {}) => safe('/candidates', { text: String(text || '').trim(), ...(search ? { search: true } : {}) }, 20000);
+export const candidates = (text, { settled = false, search = false } = {}) => safe('/candidates', { text: String(text || '').trim(), ...(settled || search ? { settled: true } : {}) }, 20000);
 export async function status() {
   if (!cfg.token) return 'nincs beállítva';
   if (!navigator.onLine) return 'net nélkül nem elérhető';

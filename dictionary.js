@@ -19,7 +19,7 @@ export const DICT = [
   ['cukkini', 'Zucchini', 'carrot', 'produce'], ['gomba', 'Champignons', 'potato', 'produce'], ['káposzta', 'Kohl', 'carrot', 'produce'],
   ['csirkemell', 'Hähnchenbrust', 'meat', 'meat'], ['csirke', 'Hähnchen', 'meat', 'meat'], ['darált hús', 'Hackfleisch', 'meat', 'meat'],
   ['sertéshús', 'Schweinefleisch', 'meat', 'meat'], ['marhahús', 'Rindfleisch', 'meat', 'meat'], ['virsli', 'Wiener Würstchen', 'meat', 'meat'],
-  ['kolbász', 'Wurst', 'meat', 'meat'], ['sonka', 'Schinken', 'meat', 'meat'], ['szalámi', 'Salami', 'meat', 'meat'],
+  ['párizsi', 'Lyoner', 'meat', 'meat'], ['kolbász', 'Wurst', 'meat', 'meat'], ['sonka', 'Schinken', 'meat', 'meat'], ['szalámi', 'Salami', 'meat', 'meat'],
   ['bacon', 'Speck', 'bacon', 'meat'], ['hal', 'Fisch', 'meat', 'meat'], ['tonhal', 'Thunfisch', 'meat', 'pantry'],
   ['tészta', 'Nudeln', 'pasta', 'pantry'], ['spagetti', 'Spaghetti', 'pasta', 'pantry'], ['rizs', 'Reis', 'pasta', 'pantry'],
   ['liszt', 'Mehl', 'bag', 'pantry'], ['cukor', 'Zucker', 'bag', 'pantry'], ['só', 'Salz', 'salt', 'pantry'], ['bors', 'Pfeffer', 'salt', 'pantry'],
@@ -58,16 +58,148 @@ export const STORE_TIP = {
 };
 
 const norm = (s) => String(s || '').toLowerCase().normalize('NFC').trim();
+export const fold = (s) => norm(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+const cleanFold = (s) => fold(s).replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
 
-// Longest-match lookup in either language; returns the entry or null.
+// Common Hungarian / colloquial / phonetic / misspelled grocery variants -> canonical DICT Hungarian word.
+// Keys are lowercase accent-folded so lookup works identically with or without accents.
+export const ALIASES = {
+  // ketchup & condiments
+  kecsap: 'ketchup',
+  kecsop: 'ketchup',
+  kecsup: 'ketchup',
+  ketsup: 'ketchup',
+  keccsap: 'ketchup',
+  majonez: 'majonéz',
+  mayonez: 'majonéz',
+  mayo: 'majonéz',
+  majo: 'majonéz',
+  mustar: 'mustár',
+  paradicsomszosz: 'paradicsomszósz',
+  // dairy
+  jogurt: 'joghurt',
+  yoghurt: 'joghurt',
+  yogurt: 'joghurt',
+  tejfol: 'tejföl',
+  tejfel: 'tejföl',
+  tejszin: 'tejszín',
+  habtejszin: 'habtejszín',
+  turo: 'túró',
+  mozarella: 'mozzarella',
+  mocarella: 'mozzarella',
+  tojas: 'tojás',
+  // bakery
+  kenyer: 'kenyér',
+  zsomle: 'zsemle',
+  zsemlye: 'zsemle',
+  toszt: 'toast kenyér',
+  toast: 'toast kenyér',
+  tosztkenyer: 'toast kenyér',
+  toastkenyer: 'toast kenyér',
+  kalacs: 'kalács',
+  // meat & cold cuts
+  parizer: 'párizsi',
+  parizser: 'párizsi',
+  parizsi: 'párizsi',
+  wirsli: 'virsli',
+  virsly: 'virsli',
+  frankfurti: 'virsli',
+  bekon: 'bacon',
+  szalonna: 'bacon',
+  szalami: 'szalámi',
+  kolbasz: 'kolbász',
+  daralthus: 'darált hús',
+  csirkehus: 'csirke',
+  // sweets & snacks
+  csoki: 'csokoládé',
+  csokolade: 'csokoládé',
+  csipsz: 'chips',
+  fagyi: 'jégkrém',
+  jegkrem: 'jégkrém',
+  gumicuki: 'gumicukor',
+  babapiskota: 'babapiskóta',
+  // produce & pantry
+  pityoka: 'krumpli',
+  cukini: 'cukkini',
+  zucini: 'cukkini',
+  brokoli: 'brokkoli',
+  spageti: 'spagetti',
+  teszta: 'tészta',
+  dzsem: 'lekvár',
+  lekvar: 'lekvár',
+  oliva: 'olívaolaj',
+  olivaolaj: 'olívaolaj',
+  muzli: 'müzli',
+  kave: 'kávé',
+  szolo: 'szőlő',
+  korte: 'körte',
+  // drinks
+  szoda: 'szódavíz',
+  asvanyviz: 'ásványvíz',
+  udito: 'üdítő',
+  szorp: 'szörp',
+  // drugstore & household
+  wcpapir: 'wc papír',
+  vecepapir: 'wc papír',
+  'vece papir': 'wc papír',
+  budipapir: 'wc papír',
+  zsepi: 'papírzsebkendő',
+  zsebkendo: 'papírzsebkendő',
+  papirzsebkendo: 'papírzsebkendő',
+  fogkrem: 'fogkrém',
+  tusfurdo: 'tusfürdő',
+  tusolo: 'tusfürdő',
+  shampoon: 'sampon',
+  sampoon: 'sampon',
+  deo: 'dezodor',
+  deodorant: 'dezodor',
+  pelus: 'pelenka',
+  popsitorlo: 'popsitörlő',
+  kukazsak: 'szemeteszsák',
+  szemeteszsak: 'szemeteszsák',
+  alufolia: 'alufólia',
+  mosopor: 'mosópor',
+  mosogatoszer: 'mosogatószer',
+  mosogatogeptabletta: 'mosogatógép tabletta',
+  'mosogatogep kapszula': 'mosogatógép tabletta',
+};
+
+// Resolves a spelling variant / colloquial alias (accent-insensitive) to its canonical DICT Hungarian word, or ''.
+export function resolveAlias(text) {
+  const f = cleanFold(text);
+  if (!f) return '';
+  return ALIASES[f] || ALIASES[f.replace(/\s+/g, '')] || '';
+}
+
+// Longest-match lookup in either language (accent-insensitive and alias-aware); returns the entry or null.
 export function lookup(text, lang) {
-  const s = ' ' + norm(text) + ' ';
+  const raw = norm(text);
+  const folded = fold(text);
+  if (!raw) return null;
+  if (lang !== 'de') {
+    const aliased = resolveAlias(raw);
+    if (aliased) {
+      const hit = DICT.find((e) => norm(e[0]) === norm(aliased));
+      if (hit) return hit;
+    }
+  }
+  const s = ' ' + raw + ' ';
+  const sf = ' ' + folded + ' ';
   let best = null;
+  let bestLen = 0;
+  let bestExactAccent = false;
   for (const e of DICT) {
     const key = norm(lang === 'de' ? e[1] : e[0]);
+    const keyF = fold(lang === 'de' ? e[1] : e[0]);
     if (!key) continue;
-    if (s.includes(' ' + key + ' ') || s.trim() === key || s.includes(key)) {
-      if (!best || key.length > norm(lang === 'de' ? best[1] : best[0]).length) best = e;
+    const accentHit = s.includes(' ' + key + ' ') || raw === key || s.includes(key);
+    const foldHit = !accentHit && (sf.includes(' ' + keyF + ' ') || folded === keyF || sf.includes(keyF));
+    if (!accentHit && !foldHit) continue;
+    const len = key.length;
+    if (!best || len > bestLen || (len === bestLen && accentHit && !bestExactAccent)) {
+      best = e;
+      bestLen = len;
+      bestExactAccent = accentHit;
     }
   }
   return best;

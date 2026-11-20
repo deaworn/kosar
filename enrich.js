@@ -5,7 +5,7 @@
 //   1. MyMemory machine translation (online): only for a missing language, shown as "tipp?"
 //   2. Open Food Facts (online), by barcode only: the exact product's photo, brand, page
 //   3. category table: price band and store tip, always labelled as estimates
-import { lookup } from './dictionary.js';
+import { lookup, fold as dictFold, resolveAlias } from './dictionary.js';
 
 const norm = (s) => String(s || '').toLowerCase().normalize('NFC').trim();
 const fold = (s) => norm(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -94,9 +94,16 @@ export async function enrich(it, { online = navigator.onLine, aiName = null, aiN
 
   for (const [f, from, other] of [['de', 'hu', 'de'], ['hu', 'de', 'hu']]) {
     if (user[f] || !user[from] || patch[f]) continue; // this language was typed (or just filled), or there is nothing to translate from
-    // 0. dictionary, exact match only
+    // 0. dictionary, exact match only (accent-insensitive and alias-aware)
     const hit = lookup(user[from], from);
-    let val = hit && norm(hit[from === 'hu' ? 0 : 1]) === norm(user[from]) ? hit[f === 'de' ? 1 : 0] : '';
+    const idx = from === 'hu' ? 0 : 1;
+    const aliased = from === 'hu' ? resolveAlias(user[from]) : '';
+    const isExact = hit && (
+      norm(hit[idx]) === norm(user[from]) ||
+      dictFold(hit[idx]) === dictFold(user[from]) ||
+      (aliased && norm(hit[0]) === norm(aliased))
+    );
+    let val = isExact ? hit[f === 'de' ? 1 : 0] : '';
     let src = val ? 'szótár' : '';
     // 1. machine translation
     if (!val) {

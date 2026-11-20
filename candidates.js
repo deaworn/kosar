@@ -4,7 +4,7 @@
 // One tap on the phone picks a candidate: the item gets that product's name, brand, price, store,
 // link and image. Until picked, the item works as a plain list entry.
 // Pure: shared by the phone (site/app.js), the helper (ai/offers.mjs), and Node tests.
-import { DICT, lookup } from './dictionary.js';
+import { DICT, ALIASES, lookup, resolveAlias } from './dictionary.js';
 import { applyBrand, splitBrand, learnable } from './brand.js';
 import { guessLang } from './lang.js';
 import { shopName } from './name-check.js';
@@ -12,59 +12,167 @@ import { unitLabel } from './units.js';
 
 const fold = (s) => String(s || '').toLowerCase().normalize('NFC').replace(/\s+/g, ' ').trim();
 const asciiFold = (s) => fold(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+const cleanWord = (s) => fold(s).replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+const cleanAscii = (s) => asciiFold(s).replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
 const DICT_HU = new Set(DICT.map((e) => fold(e[0])).filter(Boolean));
 const DICT_DE = new Set(DICT.map((e) => fold(e[1])).filter(Boolean));
 
 // Number of letters in a text (ignores spaces, digits and punctuation).
 export const letterCount = (s) => String(s ?? '').replace(/[^\p{L}]/gu, '').length;
 
-// True when the typed text is a complete known word or phrase in dictionary.js
-// (exact Hungarian or German, accent-folded, or German singular of a plural dictionary noun).
+// Explicit complete German singular nouns whose canonical DICT entry is plural.
+// Never guess via prefix/suffix heuristics (+n/+s), which falsely turn prefixes like "Lach" or "Chip" into complete words.
+const DE_SINGULAR_MAP = new Map([
+  ['apfel', 'Äpfel'],
+  ['banane', 'Bananen'],
+  ['orange', 'Orangen'],
+  ['zitrone', 'Zitronen'],
+  ['weintraube', 'Weintrauben'],
+  ['birne', 'Birnen'],
+  ['erdbeere', 'Erdbeeren'],
+  ['himbeere', 'Himbeeren'],
+  ['sauerkirsche', 'Sauerkirschen'],
+  ['mandarine', 'Mandarinen'],
+  ['tomate', 'Tomaten'],
+  ['zwiebel', 'Zwiebeln'],
+  ['kartoffel', 'Kartoffeln'],
+  ['karotte', 'Karotten'],
+  ['champignon', 'Champignons'],
+  ['nudel', 'Nudeln'],
+  ['keks', 'Kekse'],
+  ['windel', 'Windeln'],
+  ['haferflocke', 'Haferflocken'],
+  ['löffelbiskuit', 'Löffelbiskuits'],
+  ['loeffelbiskuit', 'Löffelbiskuits'],
+  ['taschentuch', 'Taschentücher'],
+  ['feuchttuch', 'Feuchttücher'],
+]);
+
+// Standard Levenshtein edit distance between two normalised strings.
+export function editDistance(a, b) {
+  const s = String(a || ''), t = String(b || '');
+  const m = s.length, n = t.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const curr = [i];
+    for (let j = 1; j <= n; j++) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    prev = curr;
+  }
+  return prev[n];
+}
+
+const KNOWN_ASCII_WORDS = (() => {
+  const set = new Set();
+  for (const e of DICT) {
+    if (e[0]) set.add(cleanAscii(e[0]));
+    if (e[1]) set.add(cleanAscii(e[1]));
+  }
+  for (const k of DE_SINGULAR_MAP.keys()) set.add(cleanAscii(k));
+  for (const k of Object.keys(ALIASES)) set.add(cleanAscii(k));
+  return [...set].filter(Boolean);
+})();
+
+// True when `aq` is a strict prefix of any known dictionary/singular/alias word
+// (meaning the user is likely still typing that word, so fuzzy matching must wait).
+function isStrictDictPrefix(aq) {
+  if (!aq) return false;
+  return KNOWN_ASCII_WORDS.some((w) => w.length > aq.length && w.startsWith(aq));
+}
+
+// Exact or alias match against DICT (accent-insensitive).
+function exactOrAliasDictEntry(q) {
+  const fq = cleanWord(q), aq = cleanAscii(q);
+  if (!aq) return null;
+  // 1. Alias check first for explicit canonical remapping (e.g. "kecsap" -> "ketchup", "csoki" -> "csokoládé")
+  const aliased = resolveAlias(q);
+  if (aliased) {
+    const hit = DICT.find((e) => cleanWord(e[0]) === cleanWord(aliased));
+    if (hit) return hit;
+  }
+  // 2. Exact DICT match (HU or DE)
+  const exactHu = DICT.find((e) => cleanWord(e[0]) === fq);
+  if (exactHu) return exactHu;
+  const exactDe = DICT.find((e) => cleanWord(e[1]) === fq);
+  if (exactDe) return exactDe;
+  // 3. Accent-folded DICT match ("tejfol" -> "tejföl", "kenyer" -> "kenyér")
+  const foldedHit = DICT.find((e) => cleanAscii(e[0]) === aq || cleanAscii(e[1]) === aq);
+  if (foldedHit) return foldedHit;
+  // 4. Explicit complete German singular noun ("Banane" -> "Bananen", "Kartoffel" -> "Kartoffeln")
+  const pluralDe = DE_SINGULAR_MAP.get(fq) || DE_SINGULAR_MAP.get(aq);
+  if (pluralDe) return DICT.find((e) => e[1] === pluralDe) || null;
+  return null;
+}
+
+// Fuzzy fallback: for words of 5+ letters with no exact/alias hit (and not a strict prefix
+// of a longer dictionary word), accept the closest dictionary word within edit distance 1
+// (6+ letters: edit distance 2 when target is also >= 6 letters).
+export function fuzzyDictEntry(q) {
+  const aq = cleanAscii(q);
+  const letters = letterCount(q);
+  if (letters < 5 || !aq) return null;
+  if (isStrictDictPrefix(aq)) return null;
+  const maxDist = letters >= 6 ? 2 : 1;
+  let best = null;
+  let bestDist = Infinity;
+  let bestLenDiff = Infinity;
+  let bestSameStart = false;
+  for (const e of DICT) {
+    for (const side of [e[0], e[1]]) {
+      const target = cleanAscii(side);
+      if (!target || target.length < 4) continue;
+      if (Math.abs(target.length - aq.length) > maxDist) continue;
+      const dist = editDistance(aq, target);
+      if (dist === 0 || dist > maxDist) continue;
+      if (dist === 2 && (letters < 6 || target.length < 6)) continue;
+      const lenDiff = Math.abs(target.length - aq.length);
+      const sameStart = aq[0] === target[0];
+      if (
+        !best ||
+        dist < bestDist ||
+        (dist === bestDist && sameStart && !bestSameStart) ||
+        (dist === bestDist && sameStart === bestSameStart && lenDiff < bestLenDiff)
+      ) {
+        best = e;
+        bestDist = dist;
+        bestLenDiff = lenDiff;
+        bestSameStart = sameStart;
+      }
+    }
+  }
+  return best;
+}
+
+function resolveDictEntry(q) {
+  return exactOrAliasDictEntry(q) || fuzzyDictEntry(q);
+}
+
+// True when the typed text resolves to a complete known dictionary word
+// (exact HU/DE, accent-folded, explicit German singular, spelling alias, or fuzzy fallback for 5+ letters).
 export function isDictionaryWord(text, learned = []) {
   const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
   if (!clean) return false;
   const r = applyBrand({ hu: clean, de: '', brand: '' }, learned);
   const q = r.hu.trim();
   if (!q || r.brand) return false;
-  const fq = fold(q), aq = asciiFold(q);
-  if (!aq) return false;
-  if (DICT.some((e) => fold(e[0]) === fq || fold(e[1]) === fq)) return true;
-  if (DICT.some((e) => asciiFold(e[0]) === aq || asciiFold(e[1]) === aq)) return true;
-  if (fq.length >= 4) {
-    return DICT.some((e) => {
-      const fd = fold(e[1]), ad = asciiFold(e[1]);
-      return fd === fq + 'n' || fd === fq + 'en' || fd === fq + 's' || ad === aq + 'n' || ad === aq + 'en';
-    });
-  }
-  return false;
+  return Boolean(resolveDictEntry(q));
 }
 
-// Resolves typed text (Hungarian or German, with or without accents) into { hu, de, brand }
-// so that typing "Kenyér", "kenyer", "Brot", or "brot" all hit the same cache key.
+// Resolves typed text (Hungarian or German, with or without accents, aliases, or fuzzy typos) into { hu, de, brand }
+// so that typing "Kenyér", "kenyer", "Brot", "Kecsap", or "ketchap" all hit the same cache key.
 export function candidateItem(text, learned = []) {
   const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
   if (!clean) return { hu: '', de: '', brand: '' };
   const r = applyBrand({ hu: clean, de: '', brand: '' }, learned);
   const q = r.hu.trim();
   if (!q) return { hu: '', de: '', brand: r.brand || '' };
-  const fq = fold(q), aq = asciiFold(q);
-  // 1. Exact dictionary match (Hungarian or German)
-  const exactHu = DICT.find((e) => fold(e[0]) === fq);
-  if (exactHu) return { hu: exactHu[0], de: exactHu[1], brand: r.brand || '' };
-  const exactDe = DICT.find((e) => fold(e[1]) === fq);
-  if (exactDe) return { hu: exactDe[0], de: exactDe[1], brand: r.brand || '' };
-  // 2. Accent-folded dictionary match ("kenyer" -> "kenyér" / "Brot", "tojas" -> "tojás" / "Eier")
-  const foldedHit = DICT.find((e) => asciiFold(e[0]) === aq || asciiFold(e[1]) === aq);
-  if (foldedHit) return { hu: foldedHit[0], de: foldedHit[1], brand: r.brand || '' };
-  // 3. German singular/plural dictionary match ("Banane" -> "Bananen", "Kartoffel" -> "Kartoffeln")
-  if (fq.length >= 4) {
-    const pluralHit = DICT.find((e) => {
-      const fd = fold(e[1]), ad = asciiFold(e[1]);
-      return fd === fq + 'n' || fd === fq + 'en' || fd === fq + 's' || ad === aq + 'n' || ad === aq + 'en';
-    });
-    if (pluralHit) return { hu: pluralHit[0], de: pluralHit[1], brand: r.brand || '' };
-  }
-  // 4. Non-dictionary phrase: detect language offline
+  const hit = resolveDictEntry(q);
+  if (hit) return { hu: hit[0], de: hit[1], brand: r.brand || '' };
+  // Non-dictionary phrase: detect language offline
   const lang = guessLang(q);
   if (lang === 'de') return { hu: '', de: q, brand: r.brand || '' };
   return { hu: q, de: '', brand: r.brand || '' };
@@ -380,17 +488,19 @@ export function addWithCandidate(text, cand, { id = '', now = Date.now(), learne
 function scoreNameMatch(name, fq, aq) {
   const fn = fold(name), an = asciiFold(name);
   if (!fn || !an) return null;
+  const fnSp = fn.replace(/-/g, ' '), anSp = an.replace(/-/g, ' ');
+  const fqSp = fq.replace(/-/g, ' '), aqSp = aq.replace(/-/g, ' ');
   const hasTypedAccent = fq !== aq;
   let tier = -1;
-  if (fn === fq) tier = 0;
-  else if (!hasTypedAccent && an === aq) tier = 1;
-  else if (fn.startsWith(fq)) tier = 2;
-  else if (an === aq) tier = 3;
-  else if (!hasTypedAccent && an.startsWith(aq)) tier = 4;
-  else if (an.startsWith(aq)) tier = 5;
+  if (fn === fq || fnSp === fqSp) tier = 0;
+  else if (!hasTypedAccent && (an === aq || anSp === aqSp)) tier = 1;
+  else if (fn.startsWith(fq) || fnSp.startsWith(fqSp)) tier = 2;
+  else if (an === aq || anSp === aqSp) tier = 3;
+  else if (!hasTypedAccent && (an.startsWith(aq) || anSp.startsWith(aqSp))) tier = 4;
+  else if (an.startsWith(aq) || anSp.startsWith(aqSp)) tier = 5;
   if (tier < 0) return null;
   const exact = tier <= 1;
-  return { name: fn, tier, exact, len: fn.length, accentExact: fn === fq || fn.startsWith(fq) };
+  return { name: fn, tier, exact, len: fn.length, accentExact: fn === fq || fn.startsWith(fq) || fnSp === fqSp || fnSp.startsWith(fqSp) };
 }
 
 function entryNamesFromKey(key) {
@@ -413,7 +523,7 @@ function entryNamesFromKey(key) {
 // Looks for cached generic entries in `db` whose hu or de name STARTS WITH the typed text
 // (accent-insensitive: "keny" -> "kenyér", "brot" -> "brot", "tej" -> "tej", "tejf" -> "tejföl").
 // Prefers exact match first, then shortest matched name. Returns { matched, candidates, key } or null.
-export function matchCachedEntry(db, text, { now = Date.now(), ttl = 3 * 864e5, max = 6, learned = [] } = {}) {
+export function matchCachedEntry(db, text, { now = Date.now(), ttl = 3 * 864e5, max = 6, learned = [], _fallback = true } = {}) {
   if (!db || typeof db !== 'object') return null;
   const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
   if (!clean) return null;
@@ -462,7 +572,21 @@ export function matchCachedEntry(db, text, { now = Date.now(), ttl = 3 * 864e5, 
     if (take) best = { match: m, candidates: cands, key, entry };
   }
 
-  return best ? { matched: best.match.name, candidates: best.candidates, key: best.key, entry: best.entry } : null;
+  if (best) return { matched: best.match.name, candidates: best.candidates, key: best.key, entry: best.entry };
+
+  // Alias / fuzzy dictionary fallback on cached entries (e.g. "Kecsap" or "ketchap" -> cached "ketchup")
+  if (_fallback) {
+    const dictHit = resolveDictEntry(clean);
+    if (dictHit) {
+      const canonHu = fold(dictHit[0]), canonDe = fold(dictHit[1]);
+      for (const qCanon of [canonHu, canonDe].filter(Boolean)) {
+        if (asciiFold(qCanon) === aq) continue;
+        const canonRes = matchCachedEntry(db, qCanon, { now, ttl, max, learned, _fallback: false });
+        if (canonRes) return canonRes;
+      }
+    }
+  }
+  return null;
 }
 
 // True when `text` matches an exact cached key in `db` (Hungarian or German, accent-insensitive).
@@ -484,18 +608,19 @@ export function hasExactCachedKey(db, text, learned = []) {
 }
 
 // Only start a background search when the text is a complete known word/phrase (dictionary.js hit,
-// or an exact cached key) or the user presses + / stops typing for 1.5 s with at least 4 letters.
-export function shouldSearchCandidates(text, { db = null, search = false, learned = [], minSearchChars = 4 } = {}) {
+// alias, fuzzy dictionary hit, or an exact cached key) or the user presses + / stops typing for 1.5 s
+// with at least 4 letters (settled: true / search: true).
+export function shouldSearchCandidates(text, { db = null, search = false, settled = false, learned = [], minSearchChars = 4 } = {}) {
   const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
   if (!clean) return false;
   if (isDictionaryWord(clean, learned)) return true;
   if (db && hasExactCachedKey(db, clean, learned)) return true;
-  if (search === true && letterCount(clean) >= minSearchChars) return true;
+  if ((search === true || settled === true) && letterCount(clean) >= minSearchChars) return true;
   return false;
 }
 
 // Debounced while-typing candidate lookup controller (~500 ms debounce, 1.5 s settle search for 4+ letters,
-// min 3 chars, max 6 rows, polls a few times on 202 pending, silent offline fallback, never blocks typing).
+// min 3 chars, max 6 rows, polls a few times on pending, silent offline fallback, never blocks typing).
 export function createTypingCandidates({
   fetchCandidates,
   onUpdate = () => {},
@@ -519,30 +644,36 @@ export function createTypingCandidates({
   };
   const setState = (next) => { state = next; onUpdate(state); };
 
-  async function run(text, mySeq, pollIndex, search = false) {
+  async function run(text, mySeq, pollIndex, settled = false) {
     if (mySeq !== seq || !isOnline() || !isConfigured()) return;
     let res = null;
-    try { res = await fetchCandidates(text, { search }); } catch { res = null; }
+    try { res = await fetchCandidates(text, { settled: Boolean(settled), search: Boolean(settled) }); } catch { res = null; }
     if (mySeq !== seq) return;
     if (!res) {
       setState({ text, candidates: [], pending: false });
       return;
     }
-    if (Array.isArray(res.candidates) && (res.candidates.length > 0 || !res.pending)) {
+    if (res.pending === true) {
+      const list = Array.isArray(res.candidates) ? sortCandidates(res.candidates, learned()).slice(0, maxRows) : [];
+      const matched = list.length && res.matched ? String(res.matched).trim() : '';
+      if (pollIndex < maxPolls) {
+        setState({ text, candidates: list, pending: true, ...(matched ? { matched } : {}) });
+        pollTimer = setTimeout(() => { pollTimer = null; run(text, mySeq, pollIndex + 1, false); }, pollMs);
+        pollTimer.unref?.();
+        return;
+      }
+      setState({ text, candidates: list, pending: false, ...(matched ? { matched } : {}) });
+      return;
+    }
+    if (Array.isArray(res.candidates)) {
       const list = sortCandidates(res.candidates, learned()).slice(0, maxRows);
       const matched = list.length && res.matched ? String(res.matched).trim() : '';
       setState({ text, candidates: list, pending: false, ...(matched ? { matched } : {}) });
-      if (!list.length && !search && settleMs > 0 && letterCount(text) >= minSearchChars && !isDictionaryWord(text, learned())) {
+      if (!list.length && !settled && settleMs > 0 && letterCount(text) >= minSearchChars && !isDictionaryWord(text, learned())) {
         const waitMs = Math.max(10, settleMs - debounceMs);
         settleTimer = setTimeout(() => { settleTimer = null; run(text, mySeq, 0, true); }, waitMs);
         settleTimer.unref?.();
       }
-      return;
-    }
-    if (res.pending === true && pollIndex < maxPolls) {
-      setState({ text, candidates: [], pending: true });
-      pollTimer = setTimeout(() => { pollTimer = null; run(text, mySeq, pollIndex + 1, false); }, pollMs);
-      pollTimer.unref?.();
       return;
     }
     setState({ text, candidates: [], pending: false });

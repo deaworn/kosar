@@ -384,7 +384,7 @@ function renderSuggest() {
   const match = q.length >= 3 && st.text.toLowerCase() === q;
   const cands = match ? st.candidates : [];
   const matched = match && cands.length ? (st.matched || '') : '';
-  const pending = match && st.pending === true && !cands.length && navigator.onLine;
+  const pending = match && st.pending === true && navigator.onLine;
   const headHtml = matched ? '<div class="shead">' + esc(matched) + ':</div>' : '';
   const candHtml = cands.map((c, i) => {
     const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
