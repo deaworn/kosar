@@ -610,7 +610,10 @@ async function kickRecognize() {
 const OFFER_TTL = 3 * 864e5, OFFER_POLL_MS = 60000;
 // a function declaration: the start-up migration (above) already needs it
 function offerKey(it) { return [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase(); }
-const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (it.offerForce || !it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
+const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (it.offerForce || !it.offer || it.offer.key !== offerKey(it) ||
+  // an answer from before round 11 (no pharmacy field): asked once more; the machine answers from its
+  // cache, and searches the online pharmacies for pharmacy items (Tomi 11104)
+  !('pharmacy' in it.offer) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
   (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3) ||
   // no price yet: ask again after an hour (the machine may have found one since; Tomi 11000)
   (!it.offer.price && Date.now() - (it.offer.at || 0) > 3600e3) ||
