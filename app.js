@@ -223,7 +223,10 @@ function iconHtml(it) {
 const eur = (v) => Number(v).toFixed(2).replace('.', ',') + ' €';
 // "Aldi Süd 1,29 € / 200 g (11-18)": store, price, unit and the day it was read from the shop page.
 // a shop price always says its unit, or that the shop did not show one (Tomi 11003); own prices keep theirs
-function priceText(p, own = false) { return (p.store ? p.store + ' ' : '') + eur(p.value) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
+// an online shop's price says so (shipping not added; Tomi 11104)
+function priceText(p, own = false) { return (p.store ? p.store + (p.online ? ' (online)' : '') + ' ' : '') + eur(p.value) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
+// the cheapest online pharmacy next to the main price, when it is another page (round 11)
+const pharmacyNote = (of) => of?.pharmacy && of.price && of.pharmacy.url !== of.price.url ? of.pharmacy : null;
 function metaHtml(it) {
   const e = it.enrich || {}, parts = [];
   // a brand only when certain: typed, from the barcode/Claude, or from the verified store page
@@ -234,6 +237,8 @@ function metaHtml(it) {
   else if (it.offer) parts.push('<span class="noprice">ár: nem találtam</span>');
   // Tomi's REWE price stays the main one; a cheaper verified shop is a note next to it
   if (!it.myPrice && it.offer?.price && it.offer?.alt) parts.push('<span class="note">olcsóbb: ' + esc(it.offer.alt.store + ' ' + eur(it.offer.alt.value)) + '</span>');
+  const ph = !it.myPrice && pharmacyNote(it.offer);
+  if (ph) parts.push('<span class="note">' + (ph.value < it.offer.price.value ? 'olcsóbb online patika: ' : 'online patika: ') + esc(priceText(ph)) + '</span>');
   // Tomi's REWE has no online price for it (the shop itself may still sell it: Tomi 11009): a note next
   // to another shop's price; with no price anywhere the row keeps "ár: nem találtam"
   if (it.offer?.price) for (const st of it.offer?.notSold || []) parts.push('<span class="note">' + esc(st) + ' online nem mutat árat</span>');
@@ -382,6 +387,8 @@ function openEditor(id, d = null) {
   else if (of) lines.push('Ár: nem találtam <span class="note">(ellenőrizve ' + esc(String(of.checked || '').slice(0, 10)) + ')</span>');
   for (const st of of?.notSold || []) lines.push(esc(st) + ': <span class="est">online nem mutat árat</span> <span class="note">(a boltban lehet, hogy kapható)</span>');
   if (of?.link && safeUrl(of.link.url)) lines.push('<a href="' + esc(of.link.url) + '" target="_blank" rel="noopener noreferrer">Termékoldal: ' + esc(of.link.store) + '</a> <span class="note">(ellenőrzött)</span>');
+  const ph = pharmacyNote(of);
+  if (ph) lines.push('Online patika (legolcsóbb, szállítás nélkül): ' + (safeUrl(ph.url) ? '<a href="' + esc(ph.url) + '" target="_blank" rel="noopener noreferrer">' + esc(priceText(ph)) + '</a>' : esc(priceText(ph))));
   if (of?.price && of?.alt) lines.push('Olcsóbb máshol: ' + (safeUrl(of.alt.url) ? '<a href="' + esc(of.alt.url) + '" target="_blank" rel="noopener noreferrer">' + esc(priceText(of.alt)) + '</a>' : esc(priceText(of.alt))) + ' <span class="note">(bolti oldal)</span>');
   const nameAuto = id && it.de && it.enrich?.autoVals?.de === it.de;
   if (nameAuto) { const nc = nameCheck(it.de, of); if (nc.state === 'ok') lines.push('Német név: egyezik a bolti termékkel <span class="note">(' + esc(nc.store) + ')</span>');
