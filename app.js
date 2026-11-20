@@ -360,12 +360,13 @@ window.addEventListener('popstate', () => { if (!$('zoom').hidden) closeZoom(); 
 // Typing suggests earlier (deleted) items and product candidates from the cache;
 // one tap brings back a deleted item or adds the item with the picked product.
 const typingCands = createTypingCandidates({
-  fetchCandidates: (text) => ai.candidates(text),
+  fetchCandidates: (text, opts) => ai.candidates(text, opts),
   onUpdate: () => renderSuggest(),
   isOnline: () => navigator.onLine,
   isConfigured: () => ai.configured(),
   learned,
   debounceMs: 500,
+  settleMs: 1500,
   pollMs: 12000,
   maxPolls: 4,
   minChars: 3,
@@ -381,7 +382,9 @@ function renderSuggest() {
   const st = typingCands.getState();
   const match = q.length >= 3 && st.text.toLowerCase() === q;
   const cands = match ? st.candidates : [];
-  const pending = match && st.pending && !cands.length && navigator.onLine;
+  const matched = match && cands.length ? (st.matched || '') : '';
+  const pending = match && st.pending === true && !cands.length && navigator.onLine;
+  const headHtml = matched ? '<div class="shead">' + esc(matched) + ':</div>' : '';
   const candHtml = cands.map((c, i) => {
     const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
     const store = c.store + (c.online ? ' (online)' : '');
@@ -392,7 +395,7 @@ function renderSuggest() {
       '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
   }).join('');
   const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
-  box.innerHTML = histHtml + candHtml + pendHtml;
+  box.innerHTML = histHtml + headHtml + candHtml + pendHtml;
   box.hidden = !hits.length && !cands.length && !pending;
 }
 function suggest() {
@@ -406,7 +409,7 @@ $('suggest').addEventListener('click', (ev) => {
     const st = typingCands.getState();
     const c = st.candidates[Number(cbtn.dataset.cand)];
     if (!c) return;
-    const it = addWithCandidate($('inName').value, c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates });
+    const it = addWithCandidate($('inName').value, c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates, matched: st.matched });
     items[it.id] = it;
     persist(); render(); reveal(it.id); kickEnrich();
     $('inName').value = ''; typingCands.clear();

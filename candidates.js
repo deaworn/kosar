@@ -15,6 +15,30 @@ const asciiFold = (s) => fold(s).normalize('NFD').replace(/[\u0300-\u036f]/g, ''
 const DICT_HU = new Set(DICT.map((e) => fold(e[0])).filter(Boolean));
 const DICT_DE = new Set(DICT.map((e) => fold(e[1])).filter(Boolean));
 
+// Number of letters in a text (ignores spaces, digits and punctuation).
+export const letterCount = (s) => String(s ?? '').replace(/[^\p{L}]/gu, '').length;
+
+// True when the typed text is a complete known word or phrase in dictionary.js
+// (exact Hungarian or German, accent-folded, or German singular of a plural dictionary noun).
+export function isDictionaryWord(text, learned = []) {
+  const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
+  if (!clean) return false;
+  const r = applyBrand({ hu: clean, de: '', brand: '' }, learned);
+  const q = r.hu.trim();
+  if (!q || r.brand) return false;
+  const fq = fold(q), aq = asciiFold(q);
+  if (!aq) return false;
+  if (DICT.some((e) => fold(e[0]) === fq || fold(e[1]) === fq)) return true;
+  if (DICT.some((e) => asciiFold(e[0]) === aq || asciiFold(e[1]) === aq)) return true;
+  if (fq.length >= 4) {
+    return DICT.some((e) => {
+      const fd = fold(e[1]), ad = asciiFold(e[1]);
+      return fd === fq + 'n' || fd === fq + 'en' || fd === fq + 's' || ad === aq + 'n' || ad === aq + 'en';
+    });
+  }
+  return false;
+}
+
 // Resolves typed text (Hungarian or German, with or without accents) into { hu, de, brand }
 // so that typing "Kenyér", "kenyer", "Brot", or "brot" all hit the same cache key.
 export function candidateItem(text, learned = []) {
@@ -316,8 +340,8 @@ export function pickCandidate(it, cand, learned = [], keys = null) {
 
 // Builds a new shopping-list item directly from typed text and a picked candidate from the
 // while-typing dropdown (Tomi 11244: one tap adds the item with name, brand, price, store, unit price, image).
-export function addWithCandidate(text, cand, { id = '', now = Date.now(), learned = [], keys = null, candidates = null } = {}) {
-  const base = candidateItem(text, learned);
+export function addWithCandidate(text, cand, { id = '', now = Date.now(), learned = [], keys = null, candidates = null, matched = '' } = {}) {
+  const base = candidateItem(matched || text, learned);
   const hit = lookup(base.hu, 'hu') || lookup(base.de, 'de');
   const it = {
     ...(id ? { id } : {}),
@@ -353,8 +377,125 @@ export function addWithCandidate(text, cand, { id = '', now = Date.now(), learne
   return it;
 }
 
-// Debounced while-typing candidate lookup controller (~500 ms debounce, min 3 chars, max 6 rows,
-// polls a few times on 202 pending, silent offline fallback, never blocks typing).
+function scoreNameMatch(name, fq, aq) {
+  const fn = fold(name), an = asciiFold(name);
+  if (!fn || !an) return null;
+  const hasTypedAccent = fq !== aq;
+  let tier = -1;
+  if (fn === fq) tier = 0;
+  else if (!hasTypedAccent && an === aq) tier = 1;
+  else if (fn.startsWith(fq)) tier = 2;
+  else if (an === aq) tier = 3;
+  else if (!hasTypedAccent && an.startsWith(aq)) tier = 4;
+  else if (an.startsWith(aq)) tier = 5;
+  if (tier < 0) return null;
+  const exact = tier <= 1;
+  return { name: fn, tier, exact, len: fn.length, accentExact: fn === fq || fn.startsWith(fq) };
+}
+
+function entryNamesFromKey(key) {
+  const parts = String(key || '').split('|');
+  if (parts.length < 4) return null;
+  const [kb, kbr, rawDe, rawHu] = parts;
+  if (kb || kbr) return null;
+  let khu = fold(rawHu), kde = fold(rawDe);
+  if (khu && !kde) {
+    const d = DICT.find((e) => fold(e[0]) === khu || asciiFold(e[0]) === asciiFold(khu));
+    if (d) kde = fold(d[1]);
+  } else if (kde && !khu) {
+    const d = DICT.find((e) => fold(e[1]) === kde || asciiFold(e[1]) === asciiFold(kde));
+    if (d) khu = fold(d[0]);
+  }
+  if (!khu && !kde) return null;
+  return { khu, kde };
+}
+
+// Looks for cached generic entries in `db` whose hu or de name STARTS WITH the typed text
+// (accent-insensitive: "keny" -> "kenyér", "brot" -> "brot", "tej" -> "tej", "tejf" -> "tejföl").
+// Prefers exact match first, then shortest matched name. Returns { matched, candidates, key } or null.
+export function matchCachedEntry(db, text, { now = Date.now(), ttl = 3 * 864e5, max = 6, learned = [] } = {}) {
+  if (!db || typeof db !== 'object') return null;
+  const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
+  if (!clean) return null;
+  if (splitBrand(clean, learned)) return null;
+  const fq = fold(clean), aq = asciiFold(clean);
+  if (!aq) return null;
+
+  const hasTypedAccent = fq !== aq;
+  let best = null;
+
+  for (const [key, entry] of Object.entries(db)) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.at && ttl > 0 && now - entry.at >= ttl) continue;
+    const names = entryNamesFromKey(key);
+    if (!names || !isGeneric({ hu: names.khu, de: names.kde }, learned)) continue;
+    const raw = Array.isArray(entry.candidates) && entry.candidates.length
+      ? entry.candidates
+      : (entry.price && entry.link ? [{ link: entry.link, price: entry.price }] : []);
+    if (!raw.length) continue;
+
+    const mHu = names.khu ? scoreNameMatch(names.khu, fq, aq) : null;
+    const mDe = names.kde ? scoreNameMatch(names.kde, fq, aq) : null;
+    if (!mHu && !mDe) continue;
+
+    let m = mHu || mDe;
+    if (mHu && mDe) {
+      if (mHu.exact !== mDe.exact) m = mHu.exact ? mHu : mDe;
+      else if (mHu.accentExact !== mDe.accentExact) m = mHu.accentExact ? mHu : mDe;
+      else m = mHu;
+    }
+
+    const cands = sortCandidates(raw, learned).slice(0, max);
+    if (!cands.length) continue;
+
+    if (!best) {
+      best = { match: m, candidates: cands, key, entry };
+      continue;
+    }
+    const bm = best.match;
+    let take = false;
+    if (m.exact !== bm.exact) take = m.exact;
+    else if (hasTypedAccent && m.accentExact !== bm.accentExact) take = m.accentExact;
+    else if (m.len !== bm.len) take = m.len < bm.len;
+    else if (m.tier !== bm.tier) take = m.tier < bm.tier;
+    else take = m.name.localeCompare(bm.name, 'hu') < 0;
+    if (take) best = { match: m, candidates: cands, key, entry };
+  }
+
+  return best ? { matched: best.match.name, candidates: best.candidates, key: best.key, entry: best.entry } : null;
+}
+
+// True when `text` matches an exact cached key in `db` (Hungarian or German, accent-insensitive).
+export function hasExactCachedKey(db, text, learned = []) {
+  if (!db || typeof db !== 'object') return false;
+  const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
+  if (!clean) return false;
+  const aq = asciiFold(clean);
+  if (!aq) return false;
+  const it = candidateItem(clean, learned);
+  const directKey = [it.barcode || '', fold(it.brand), fold(it.de), fold(it.hu)].join('|');
+  if (db[directKey]) return true;
+  for (const key of Object.keys(db)) {
+    const names = entryNamesFromKey(key);
+    if (!names) continue;
+    if ((names.khu && asciiFold(names.khu) === aq) || (names.kde && asciiFold(names.kde) === aq)) return true;
+  }
+  return false;
+}
+
+// Only start a background search when the text is a complete known word/phrase (dictionary.js hit,
+// or an exact cached key) or the user presses + / stops typing for 1.5 s with at least 4 letters.
+export function shouldSearchCandidates(text, { db = null, search = false, learned = [], minSearchChars = 4 } = {}) {
+  const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
+  if (!clean) return false;
+  if (isDictionaryWord(clean, learned)) return true;
+  if (db && hasExactCachedKey(db, clean, learned)) return true;
+  if (search === true && letterCount(clean) >= minSearchChars) return true;
+  return false;
+}
+
+// Debounced while-typing candidate lookup controller (~500 ms debounce, 1.5 s settle search for 4+ letters,
+// min 3 chars, max 6 rows, polls a few times on 202 pending, silent offline fallback, never blocks typing).
 export function createTypingCandidates({
   fetchCandidates,
   onUpdate = () => {},
@@ -362,36 +503,46 @@ export function createTypingCandidates({
   isConfigured = () => true,
   learned = () => [],
   debounceMs = 500,
+  settleMs = 1500,
   pollMs = 12000,
   maxPolls = 4,
   minChars = 3,
+  minSearchChars = 4,
   maxRows = 6,
 } = {}) {
-  let seq = 0, debounceTimer = null, pollTimer = null;
+  let seq = 0, debounceTimer = null, settleTimer = null, pollTimer = null;
   let state = { text: '', candidates: [], pending: false };
   const stopTimers = () => {
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   };
   const setState = (next) => { state = next; onUpdate(state); };
 
-  async function run(text, mySeq, pollIndex) {
+  async function run(text, mySeq, pollIndex, search = false) {
     if (mySeq !== seq || !isOnline() || !isConfigured()) return;
     let res = null;
-    try { res = await fetchCandidates(text); } catch { res = null; }
+    try { res = await fetchCandidates(text, { search }); } catch { res = null; }
     if (mySeq !== seq) return;
     if (!res) {
       setState({ text, candidates: [], pending: false });
       return;
     }
-    if (Array.isArray(res.candidates)) {
+    if (Array.isArray(res.candidates) && (res.candidates.length > 0 || !res.pending)) {
       const list = sortCandidates(res.candidates, learned()).slice(0, maxRows);
-      setState({ text, candidates: list, pending: false });
+      const matched = list.length && res.matched ? String(res.matched).trim() : '';
+      setState({ text, candidates: list, pending: false, ...(matched ? { matched } : {}) });
+      if (!list.length && !search && settleMs > 0 && letterCount(text) >= minSearchChars && !isDictionaryWord(text, learned())) {
+        const waitMs = Math.max(10, settleMs - debounceMs);
+        settleTimer = setTimeout(() => { settleTimer = null; run(text, mySeq, 0, true); }, waitMs);
+        settleTimer.unref?.();
+      }
       return;
     }
-    if (res.pending && pollIndex < maxPolls) {
+    if (res.pending === true && pollIndex < maxPolls) {
       setState({ text, candidates: [], pending: true });
-      pollTimer = setTimeout(() => { pollTimer = null; run(text, mySeq, pollIndex + 1); }, pollMs);
+      pollTimer = setTimeout(() => { pollTimer = null; run(text, mySeq, pollIndex + 1, false); }, pollMs);
+      pollTimer.unref?.();
       return;
     }
     setState({ text, candidates: [], pending: false });
@@ -407,7 +558,19 @@ export function createTypingCandidates({
         return;
       }
       const mySeq = seq;
-      debounceTimer = setTimeout(() => { debounceTimer = null; run(text, mySeq, 0); }, debounceMs);
+      debounceTimer = setTimeout(() => { debounceTimer = null; run(text, mySeq, 0, false); }, debounceMs);
+      debounceTimer.unref?.();
+    },
+    submit(rawText) {
+      seq++;
+      stopTimers();
+      const text = String((rawText ?? state.text) || '').trim();
+      if (!text || !isOnline() || !isConfigured()) {
+        setState({ text, candidates: [], pending: false });
+        return;
+      }
+      const mySeq = seq;
+      run(text, mySeq, 0, true);
     },
     clear() {
       seq++;
