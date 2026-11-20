@@ -7,6 +7,8 @@
 // Pure: used by the app, tested in node.
 export const COOLDOWN = 5 * 60e3;
 
+import { chosenVariant } from './variants.js';
+
 const label = (it) => it.hu || it.de || 'fotós tétel';
 
 // A product named by its brand ("Gaviscon dual") is called the same in a German shop: no
@@ -18,7 +20,7 @@ export function missingParts(it, hasPic) {
   const out = [];
   if (!it.de && !brandNamed(it)) out.push('német név');
   if (!hasPic(it)) out.push('kép');
-  if (!(it.offer?.price || it.myPrice)) out.push('ár');
+  if (!(it.offer?.price || it.myPrice || chosenVariant(it))) out.push('ár'); // a chosen pack size is a price
   return out;
 }
 

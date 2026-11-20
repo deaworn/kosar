@@ -8,6 +8,7 @@ import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, da
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
 import { selectMissing, summarize, summaryText } from './refresh.js';
+import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
@@ -232,11 +233,15 @@ function metaHtml(it) {
   // a brand only when certain: typed, from the barcode/Claude, or from the verified store page
   const brand = it.brand || it.offer?.link?.brand || '';
   if (brand) parts.push(esc(brand));
+  // a pack size in use (Tomi's pick or his usual band) is the price; the number of sizes is a hint to pick
+  const pv = !it.myPrice && chosenVariant(it), nv = it.offer?.variants?.length || 0;
   if (it.myPrice) parts.push('<span class="price">' + esc(priceText(it.myPrice, true)) + '</span> <span class="tag">saját</span>');
+  else if (pv) parts.push('<span class="price">' + esc(shortName(pv.name, it.brand) + ': ' + priceText(pv)) + '</span>');
   else if (it.offer?.price) parts.push('<span class="price">' + esc(priceText(it.offer.price)) + '</span>');
   else if (it.offer) parts.push('<span class="noprice">ár: nem találtam</span>');
   // Tomi's REWE price stays the main one; a cheaper verified shop is a note next to it
   if (!it.myPrice && it.offer?.price && it.offer?.alt) parts.push('<span class="note">olcsóbb: ' + esc(it.offer.alt.store + ' ' + eur(it.offer.alt.value)) + '</span>');
+  if (!it.myPrice && nv > 1) parts.push('<span class="note">' + nv + ' kiszerelés, koppints a választáshoz</span>');
   const ph = !it.myPrice && pharmacyNote(it.offer);
   if (ph) parts.push('<span class="note">' + (ph.value < it.offer.price.value ? 'olcsóbb online patika: ' : 'online patika: ') + esc(priceText(ph)) + '</span>');
   // Tomi's REWE has no online price for it (the shop itself may still sell it: Tomi 11009): a note next
@@ -373,6 +378,11 @@ function openEditor(id, d = null) {
   $('edHu').placeholder = id && !it.hu && !it.de ? 'írd be a nevét' : '';
   $('edHu').value = it.hu || ''; $('edDe').value = it.de || ''; $('edQty').value = it.qty || '';
   $('edBrand').value = it.brand || ''; $('edGroup').value = it.group || 'kell';
+  // pack sizes (round 12): Tomi picks one; the default (his usual band) is preselected
+  const vs = id ? it.offer?.variants || [] : [], cur = id ? chosenVariant(it) : null;
+  $('edVarWrap').hidden = vs.length < 2;
+  $('edVariant').innerHTML = (cur ? '' : '<option value="">válassz…</option>') + vs.map((v) => '<option value="' + esc(v.name) + '"' + (cur && cur.name === v.name ? ' selected' : '') + '>' +
+    esc(shortName(v.name, it.brand) + ' · ' + v.unit + ' · ' + eur(v.value)) + '</option>').join('');
   $('edPrice').value = it.myPrice ? String(it.myPrice.value).replace('.', ',') : ''; $('edStore').value = it.myPrice?.store || '';
   $('edPrice').placeholder = it.offer?.price ? eur(it.offer.price.value) + ' (gép)' : 'pl. 1,29';
   $('edDelete').hidden = !id;
@@ -428,7 +438,8 @@ for (const fid of ['edPhotoFile', 'edPhotoCamFile']) {
 }
 $('edPhotoDel').addEventListener('click', () => { edPhoto = null; showEdPhoto(editing); });
 $('edForm').addEventListener('submit', async () => {
-  const v = { hu: $('edHu').value.trim(), de: $('edDe').value.trim(), qty: $('edQty').value.trim(), brand: $('edBrand').value.trim(), group: $('edGroup').value };
+  const v = { hu: $('edHu').value.trim(), de: $('edDe').value.trim(), qty: $('edQty').value.trim(), brand: $('edBrand').value.trim(), group: $('edGroup').value,
+    ...(!$('edVarWrap').hidden ? { variant: $('edVariant').value } : {}) };
   // own price: always wins over the machine's ("saját"); an empty field removes it
   const pv = Number($('edPrice').value.replace(',', '.').replace(/[^\d.]/g, ''));
   const myPrice = pv > 0 && pv < 10000 ? { value: Math.round(pv * 100) / 100, store: $('edStore').value.trim().slice(0, 30), date: new Date().toISOString().slice(0, 10) } : null;
@@ -613,7 +624,9 @@ function offerKey(it) { return [it.hu || '', it.de || '', it.brand || '', it.bar
 const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (it.offerForce || !it.offer || it.offer.key !== offerKey(it) ||
   // an answer from before round 11 (no pharmacy field): asked once more; the machine answers from its
   // cache, and searches the online pharmacies for pharmacy items (Tomi 11104)
-  !('pharmacy' in it.offer) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
+  !('pharmacy' in it.offer) ||
+  // ...and from before round 12 (no variants field): once more for the pack sizes (tobacco)
+  !('variants' in it.offer) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
   (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3) ||
   // no price yet: ask again after an hour (the machine may have found one since; Tomi 11000)
   (!it.offer.price && Date.now() - (it.offer.at || 0) > 3600e3) ||
