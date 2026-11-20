@@ -28,6 +28,7 @@
   </header>
 
   <div class="ptr" id="ptr" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg></div>
+  <div class="keybanner" id="keyBanner" hidden role="region" aria-label="Gépi segéd kulcs"></div>
   <div id="list"></div>
 
   <div class="tools" id="tools" hidden>
@@ -97,6 +98,7 @@
     <button type="button" class="mitem" id="mHistory"><b>Korábbi tételek</b><span>törölt tételek visszahívása egy koppintással</span></button>
     <button type="button" class="mitem" id="mImport"><b>Lista importálása</b><span>régi lista beillesztése vagy fájlból</span></button>
     <button type="button" class="mitem" id="mBackup"><b>Biztonsági mentés</b><span>a lista fájlba vagy megosztásba (pl. magadnak Telegramon)</span></button>
+    <button type="button" class="mitem" id="mAiKey"><b>Gépi segéd kulcs</b><span id="mAiKeySub">nincs beállítva</span></button>
     <p class="mnote" id="aiState"></p>
     <p class="mnote">A lista csak ezen a telefonon van, nincs szerver és nincs fiók. Net nélkül is működik; a német név, fotó és ár-becslés netre vár.</p>
     <button type="button" class="ghost" id="menuClose">Bezárás</button>
@@ -113,6 +115,24 @@
     <button type="button" class="ghost" id="imCancel">Mégse</button>
     <button type="button" class="primary" id="imGo" disabled>Importálás</button>
   </div>
+</dialog>
+
+<dialog id="aiKeyDialog" aria-labelledby="akTitle">
+  <form id="akForm" method="dialog" autocomplete="off">
+    <h2 id="akTitle" tabindex="-1" autofocus>Gépi segéd kulcs</h2>
+    <p class="note akstate" id="akState"></p>
+    <button type="button" class="ghost akpaste" id="akPaste" hidden>Beillesztés vágólapról</button>
+    <label>Kapott link vagy kulcs beillesztése
+      <input id="akInput" type="text" placeholder="https://…/#ai=… vagy kulcs" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </label>
+    <div class="hint" id="akHint"></div>
+    <div class="edbtns">
+      <button type="button" class="ghost danger" id="akDelete" hidden>Törlés</button>
+      <span class="grow"></span>
+      <button type="button" class="ghost" id="akCancel">Mégse</button>
+      <button type="submit" class="primary" id="akSave">Mentés</button>
+    </div>
+  </form>
 </dialog>
 
 <dialog id="photoSheet" aria-labelledby="psTitle">

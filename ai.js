@@ -3,6 +3,8 @@
 // machine start, so it is looked up in a public gist that holds only that
 // address. The access token comes once via a link (#ai=...) and stays on the
 // phone. Every failure is silent: the caller falls back to the free path.
+import { buildAiLink } from './ai-key.js';
+
 const GIST = 'https://api.github.com/gists/645f862b3318ab9fbfc259c14c1eee6a';
 const LS = 'bv.ai';
 // Back-off: an unreachable machine (network error) pauses every kind of call for
@@ -13,14 +15,29 @@ let cfg = load(), downUntil = { all: 0 }, discovering = null, lastError = '';
 export const lastFailure = () => lastError;
 
 function load() { try { return JSON.parse(localStorage.getItem(LS) || '{}') || {}; } catch { return {}; } }
-function save() { try { localStorage.setItem(LS, JSON.stringify(cfg)); } catch { /* storage blocked */ } }
+function save() {
+  try { localStorage.setItem(LS, JSON.stringify(cfg)); return true; }
+  catch { return false; }
+}
 
 export const configured = () => !!cfg.token;
-export function setToken(token, url = '') {
-  cfg = { token: String(token).slice(0, 200), url: url && /^https?:\/\//.test(url) ? url.replace(/\/$/, '') : '', fixed: !!url };
-  downUntil = { all: 0 }; save();
+export function setToken(token, url = '', { copyPending = false } = {}) {
+  const cleanUrl = url && /^https?:\/\//.test(url) ? url.replace(/\/$/, '') : '';
+  cfg = { token: String(token).slice(0, 200), url: cleanUrl, fixed: !!cleanUrl, ...(copyPending ? { copyPending: true } : {}) };
+  downUntil = { all: 0 }; lastError = '';
+  return save();
 }
-export function forget() { cfg = {}; save(); }
+export function forget() { cfg = {}; downUntil = { all: 0 }; lastError = ''; save(); }
+
+export function pendingKeyLink(baseUrl) {
+  return cfg.copyPending ? buildAiLink(baseUrl, { token: cfg.token, url: cfg.fixed ? cfg.url : '' }) : '';
+}
+
+export function finishKeyCopy(baseUrl, link) {
+  if (!link || pendingKeyLink(baseUrl) !== link) return;
+  delete cfg.copyPending;
+  save();
+}
 
 async function discover() {
   if (cfg.fixed) return cfg.url;

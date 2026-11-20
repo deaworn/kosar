@@ -174,3 +174,18 @@ li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:
 .cname{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .csub{color:var(--muted);font-family:var(--f-mono);font-size:.72rem}
 .cprice{flex:none;color:var(--accent);font-family:var(--f-mono);font-weight:700;font-size:.86rem}
+
+/* iOS Home Screen key banner & Safari copy tip (Tomi 11340-11343) */
+.keybanner{background:var(--tint);border:1px solid var(--tint-hi);border-radius:14px;padding:12px 12px 12px 14px;margin:4px 0 10px;display:grid;gap:8px}
+.kbtop{display:flex;align-items:flex-start;gap:8px}
+.kbtxt{flex:1;min-width:0;font-size:.9rem;line-height:1.35;color:var(--ink)}
+.kbclose{flex:none;background:none;border:0;color:var(--muted);font-size:1.25rem;line-height:1;padding:2px 6px;margin:-2px -4px 0 0;cursor:pointer;border-radius:8px}
+.kbacts{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.kbacts .primary{padding:7px 14px;font-size:.86rem}
+.kbform{display:flex;gap:8px;align-items:center}
+.kbform input{flex:1;padding:9px 11px;font-size:.88rem;background:var(--bg)}
+.kbform .primary{flex:none;padding:9px 14px;font-size:.86rem}
+.kbmsg{font-size:.78rem;color:var(--muted)}
+.kbmsg:empty{display:none}
+.akstate{margin:0 0 12px}
+.akpaste{margin:0 0 12px;width:100%}

@@ -7,6 +7,7 @@ import { applyBrand as splitInto, moveBrand, learnBrands, learnable } from './br
 import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
+import { parseAiInput, isStandalone, isSafari, chooseKeyBanner, keyStatusText } from './ai-key.js';
 import { selectMissing } from './refresh.js';
 import { guessLang } from './lang.js';
 import { chosenVariant, shortName } from './variants.js';
@@ -800,7 +801,7 @@ setInterval(() => { if (refreshRun) refreshTick(); }, 2000);
 const PULL_PX = 80;
 let pullY = null, pullD = 0;
 const anyOpen = () => [...document.querySelectorAll('dialog')].some((d) => d.open);
-addEventListener('touchstart', (e) => { pullY = scrollY <= 0 && !anyOpen() && e.touches.length === 1 && !e.target.closest('.addbar,.suggest') ? e.touches[0].clientY : null; pullD = 0; }, { passive: true });
+addEventListener('touchstart', (e) => { pullY = scrollY <= 0 && !anyOpen() && e.touches.length === 1 && !e.target.closest('.addbar,.suggest,.keybanner') ? e.touches[0].clientY : null; pullD = 0; }, { passive: true });
 addEventListener('touchmove', (e) => {
   if (pullY === null) return;
   pullD = Math.max(0, e.touches[0].clientY - pullY);
@@ -901,6 +902,7 @@ $('imGo').addEventListener('click', async () => {
 });
 $('imCancel').addEventListener('click', () => $('importer').close());
 $('menuBtn').addEventListener('click', () => {
+  $('mAiKeySub').textContent = keyStatusText(ai.configured());
   $('aiState').textContent = ai.configured() ? 'AI-segéd (gép): ellenőrzés…' : 'AI-segéd (gép): nincs beállítva';
   $('menu').showModal();
   if (ai.configured()) { const lf = ai.lastFailure(); ai.status().then((st) => { $('aiState').textContent = 'AI-segéd (gép): ' + st + (lf ? ' · utolsó hiba: ' + lf : ''); }); }
@@ -908,6 +910,7 @@ $('menuBtn').addEventListener('click', () => {
 $('menuClose').addEventListener('click', () => $('menu').close());
 $('mImport').addEventListener('click', () => openImport());
 $('mHistory').addEventListener('click', openHistory);
+$('mAiKey').addEventListener('click', openAiKeyDialog);
 $('mBackup').addEventListener('click', async () => {
   $('menu').close();
   const photos = {};
@@ -925,16 +928,168 @@ $('mBackup').addEventListener('click', async () => {
   setStatus('Mentés letöltve: ' + name + (Object.keys(photos).length ? ' (' + Object.keys(photos).length + ' fotóval)' : ''));
 });
 
+// ---- AI helper key (menu + iOS standalone banner + Safari one-time tip) --------
+const LS_KEY_BANNER_DISMISSED = 'bv.keyBannerDismissed';
+function readFlag(k) { try { return localStorage.getItem(k) === '1'; } catch { return false; } }
+function writeFlag(k, v) { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } }
+
+let standaloneDismissed = readFlag(LS_KEY_BANNER_DISMISSED);
+let kbShowInput = false, kbHint = '';
+
+async function copyText(text) {
+  if (!text) return false;
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* fallback below */ }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
+function applyAiKey(parsed, { copyPending = false } = {}) {
+  const saved = ai.setToken(parsed.token, parsed.url, { copyPending });
+  kbShowInput = false; kbHint = '';
+  setStatus('AI-segéd beállítva. Ellenőrzés…');
+  ai.status().then((st) => setStatus('AI-segéd: ' + st + '.'));
+  renderKeyBanners();
+  kickEnrich(); kickRecognize(); kickOffers();
+  return saved;
+}
+
+function openAiKeyDialog() {
+  if ($('menu').open) $('menu').close();
+  $('akState').textContent = 'Állapot: ' + keyStatusText(ai.configured());
+  $('akInput').value = '';
+  $('akHint').textContent = '';
+  $('akDelete').hidden = !ai.configured();
+  $('akPaste').hidden = typeof navigator.clipboard?.readText !== 'function';
+  $('aiKeyDialog').showModal();
+}
+
+$('akPaste').addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    const parsed = parseAiInput(text);
+    if (parsed) {
+      $('akInput').value = '';
+      $('aiKeyDialog').close();
+      applyAiKey(parsed);
+      return;
+    }
+    $('akHint').textContent = 'A vágólapon nem volt érvényes link vagy kulcs – illeszd be a mezőbe.';
+  } catch {
+    $('akHint').textContent = 'A vágólapot nem tudtam elolvasni – illeszd be kézzel a mezőbe.';
+  }
+  $('akInput').focus();
+});
+
+$('akForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const parsed = parseAiInput($('akInput').value);
+  if (!parsed) {
+    $('akHint').textContent = 'Nem találtam érvényes kulcsot. Illeszd be a teljes kapott linket (#ai=…) vagy magát a kulcsot.';
+    $('akInput').focus();
+    return;
+  }
+  $('akInput').value = '';
+  $('aiKeyDialog').close();
+  applyAiKey(parsed);
+});
+
+$('akCancel').addEventListener('click', () => { $('akInput').value = ''; $('aiKeyDialog').close(); });
+$('akDelete').addEventListener('click', () => {
+  ai.forget();
+  $('akInput').value = '';
+  $('aiKeyDialog').close();
+  renderKeyBanners();
+  setStatus('AI-segéd kulcs törölve.');
+});
+
+function renderKeyBanners() {
+  const box = $('keyBanner');
+  if (!box) return;
+  const baseUrl = location.href.split('#')[0];
+  const copyLink = ai.pendingKeyLink(baseUrl);
+  const kind = chooseKeyBanner({
+    standalone: isStandalone({
+      navigatorStandalone: !!navigator.standalone,
+      displayModeStandalone: !!window.matchMedia?.('(display-mode: standalone)')?.matches,
+    }),
+    safari: isSafari(navigator.userAgent),
+    hasKey: ai.configured(),
+    fromLink: !!copyLink,
+    standaloneDismissed,
+  });
+  if (kind === 'none') { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  if (kind === 'standalone-need-key') {
+    const canRead = typeof navigator.clipboard?.readText === 'function';
+    const showForm = !canRead || kbShowInput;
+    box.innerHTML = '<div class="kbtop"><span class="kbtxt">Az árakhoz illeszd be a kapott linket</span>' +
+      '<button type="button" class="kbclose" id="kbClose" aria-label="Bezárás">×</button></div>' +
+      (showForm
+        ? '<form class="kbform" id="kbForm" autocomplete="off"><input id="kbInput" type="text" placeholder="Link vagy kulcs beillesztése" aria-label="Link vagy kulcs beillesztése" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><button type="submit" class="primary">Mentés</button></form>'
+        : '<div class="kbacts"><button type="button" class="primary" id="kbPaste">Beillesztés</button></div>') +
+      '<div class="kbmsg" id="kbMsg">' + esc(kbHint) + '</div>';
+    $('kbClose').addEventListener('click', () => { standaloneDismissed = true; writeFlag(LS_KEY_BANNER_DISMISSED, '1'); renderKeyBanners(); });
+    if (showForm) {
+      $('kbForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const parsed = parseAiInput($('kbInput').value);
+        if (!parsed) { $('kbMsg').textContent = 'Nem találtam érvényes linket vagy kulcsot.'; $('kbInput').focus(); return; }
+        $('kbInput').value = '';
+        applyAiKey(parsed);
+      });
+    } else {
+      $('kbPaste').addEventListener('click', async () => {
+        try {
+          const text = await navigator.clipboard.readText();
+          const parsed = parseAiInput(text);
+          if (parsed) { applyAiKey(parsed); return; }
+          kbShowInput = true; kbHint = 'A vágólapon nem a link volt – illeszd be ide:';
+        } catch {
+          kbShowInput = true; kbHint = 'Illeszd be ide a kapott linket vagy kulcsot:';
+        }
+        renderKeyBanners();
+        $('kbInput')?.focus();
+      });
+    }
+    return;
+  }
+  // Keep the link available across reloads until copying succeeds or the user dismisses the tip.
+  box.innerHTML = '<div class="kbtop"><span class="kbtxt">iPhone-on telepítés után egyszer illeszd be újra a linket</span>' +
+    '<button type="button" class="kbclose" id="kbClose" aria-label="Bezárás">×</button></div>' +
+    '<div class="kbacts"><button type="button" class="primary" id="kbCopy">Link másolása</button></div>';
+  const finish = () => { ai.finishKeyCopy(baseUrl, copyLink); renderKeyBanners(); };
+  $('kbClose').addEventListener('click', finish);
+  $('kbCopy').addEventListener('click', async () => {
+    const ok = await copyText(copyLink);
+    if (ok) { finish(); setStatus('Link másolva. Telepítés után illeszd be a Kosárba.'); }
+    else setStatus('A másolás nem sikerült. Másold ki a kapott linket az üzenetből.');
+  });
+}
+
 // An import link carries the list in the URL fragment (#import=<base64url JSON>).
 // The fragment never leaves the phone: browsers do not send it to the web host.
 function hashImport() {
-  const a = location.hash.match(/^#ai=([A-Za-z0-9_-]{16,200})(?:&u=([^&]+))?$/);
-  if (a) {
-    history.replaceState(null, '', location.pathname + location.search);
-    ai.setToken(a[1], a[2] ? decodeURIComponent(a[2]) : '');
-    setStatus('AI-segéd beállítva. Ellenőrzés…');
-    ai.status().then((st) => setStatus('AI-segéd: ' + st + '.'));
-    return;
+  if (/^#ai=/i.test(location.hash)) {
+    const parsed = parseAiInput(location.hash);
+    if (parsed) {
+      if (applyAiKey(parsed, { copyPending: true })) {
+        history.replaceState(null, '', location.pathname + location.search);
+      }
+      return;
+    }
   }
   const m = location.hash.match(/^#import=([A-Za-z0-9_-]+)$/);
   if (!m) return;
@@ -984,7 +1139,7 @@ function review(force = false) {
 }
 setInterval(() => { if (!document.hidden) review(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) review(); });
-render(); setNet(); hashImport();
+render(); setNet(); hashImport(); renderKeyBanners();
 loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); review(true); });
 
 if ('serviceWorker' in navigator) {
@@ -994,7 +1149,7 @@ if ('serviceWorker' in navigator) {
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloaded) return;
-    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open) return; // never lose an open form
+    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open) return; // never lose an open form
     reloaded = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(() => {});
