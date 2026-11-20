@@ -7,7 +7,7 @@ import { applyBrand as splitInto, moveBrand, learnBrands, learnable } from './br
 import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
-import { selectMissing, summarize, summaryText } from './refresh.js';
+import { selectMissing } from './refresh.js';
 import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
@@ -657,26 +657,30 @@ async function kickOffers() {
   }
 }
 
-// ---- pull-down refresh (Tomi 11102) -------------------------------------------------
+// ---- pull-down refresh (Tomi 11102, 11202) ------------------------------------------
 // Pull the list down at the top: the items still missing a German name, picture or price
-// are sent to the machine again. A banner says how many, and at the end what was found
-// and what is still missing. Rules (which items, cool-down): site/refresh.js.
-const REFRESH_MAX_MS = 12 * 60e3;
-let refreshRun = null, refreshHide = null;
-// (elements may be missing for a moment while an update swaps the page: never fail on that)
-const hideRefresh = () => { if ($('refresh')) $('refresh').hidden = true; };
-function showRefresh(text, busy) {
-  clearTimeout(refreshHide);
-  const box = $('refresh'); if (!box) return;
-  $('refreshTxt').textContent = text; box.hidden = false; box.classList.toggle('busy', !!busy);
+// are sent to the machine again. The only sign is the round spinner at the top, as the
+// browser's own pull-down had it (Tomi 11202: "csak a kör felül, ahogy volt"); no text.
+// It spins while the search runs. Rules (which items, cool-down): site/refresh.js.
+const REFRESH_MAX_MS = 12 * 60e3; // the run is followed this long (items stay forced after)
+const SPIN_MAX_MS = 3 * 60e3; // the spinner never stays longer than this
+const SPIN_MIN_MS = 700; // nothing to do / offline: one short turn, so the pull is answered
+let refreshRun = null, spinUntil = 0, spinEnd = null;
+const ptr = () => $('ptr');
+function spin(on) {
+  const el = ptr(); if (!el) return;
+  clearTimeout(spinEnd);
+  if (on) { el.classList.add('spin'); el.classList.remove('pulling'); el.style.transform = ''; return; }
+  const left = spinUntil - Date.now();
+  if (left > 0) { spinEnd = setTimeout(() => spin(false), left); return; }
+  el.classList.remove('spin', 'ready');
 }
-$('refreshClose')?.addEventListener('click', hideRefresh);
 function refreshMissing() {
-  if (refreshRun) { showRefresh(refreshText(), true); return; }
-  if (!navigator.onLine) { showRefresh('Nincs net: most nem tudok keresni. Ha lesz net, a hiányos tételeket magamtól újrakeresem.'); return; }
-  const { todo, waiting } = selectMissing(items, pics);
-  const wait = waiting.length ? ' (' + waiting.length + ' tételt pár perce kerestem, azt most kihagyom.)' : '';
-  if (!todo.length) { showRefresh((waiting.length ? 'Nincs új keresnivaló.' : 'Minden tétel rendben, nincs hiányos.') + wait); refreshHide = setTimeout(hideRefresh, 8000); return; }
+  spinUntil = Date.now() + SPIN_MIN_MS; spin(true);
+  if (refreshRun) return;
+  if (!navigator.onLine) { spin(false); return; } // the header dot already says offline
+  const { todo } = selectMissing(items, pics);
+  if (!todo.length) { spin(false); return; }
   const now = Date.now();
   for (const t of todo) {
     const it = items[t.id];
@@ -685,30 +689,22 @@ function refreshMissing() {
     if (t.parts.includes('német név') && it.enrich) { it.enrich.complete = false; it.enrich.at = 0; }
   }
   persist();
-  refreshRun = { todo, start: now, wait, down: false };
-  showRefresh(refreshText(), true);
+  refreshRun = { todo, start: now, down: false };
   if (!ai.configured()) refreshRun.down = true;
   kickEnrich(); kickOffers(); refreshTick();
 }
 function refreshPending() {
   return refreshRun.todo.filter((t) => { const it = items[t.id]; return it && (it.offerForce || (it.enrich && !it.enrich.complete)); });
 }
-function refreshText() {
-  const n = refreshRun.todo.length, open = refreshPending().length;
-  return n + ' hiányos tétel, újrakeresem… (' + (n - open) + '/' + n + ' kész)' + refreshRun.wait;
-}
 function refreshTick() {
   if (!refreshRun) return;
-  const open = refreshPending().length;
-  const over = Date.now() - refreshRun.start > REFRESH_MAX_MS;
-  if (open && !over && !refreshRun.down) { showRefresh(refreshText(), true); return; }
-  const s = summarize(refreshRun, items, pics);
-  const tail = refreshRun.down && open ? ' A gép most nem érhető el, később magától újra próbálom.' : over && open ? ' A keresés még fut a gépen; ha meglesz, magától megjelenik.' : '';
-  refreshRun = null;
-  showRefresh(summaryText(s) + tail);
-  refreshHide = setTimeout(hideRefresh, 30000);
+  const age = Date.now() - refreshRun.start;
+  const open = refreshPending().length && !refreshRun.down;
+  if (open && age < SPIN_MAX_MS) return; // still searching: keep spinning
+  spin(false);
+  if (!open || age > REFRESH_MAX_MS) refreshRun = null;
 }
-setInterval(() => { if (refreshRun) refreshTick(); }, 5000);
+setInterval(() => { if (refreshRun) refreshTick(); }, 2000);
 // The gesture: at the top of the page, pull down at least PULL_PX and let go.
 const PULL_PX = 80;
 let pullY = null, pullD = 0;
@@ -718,14 +714,18 @@ addEventListener('touchmove', (e) => {
   if (pullY === null) return;
   pullD = Math.max(0, e.touches[0].clientY - pullY);
   if (scrollY > 0) { pullY = null; pullD = 0; }
-  const h = Math.min(pullD * 0.5, 64), ptr = $('ptr'); if (!ptr) return;
-  ptr.classList.add('pulling'); ptr.style.height = h + 'px';
-  ptr.classList.toggle('ready', pullD >= PULL_PX);
-  $('ptrTxt').textContent = pullD >= PULL_PX ? 'Engedd el: újrakeresem a hiányosakat' : 'Húzd le: a hiányos tételeket újrakeresem';
+  const el = ptr(); if (!el || el.classList.contains('spin')) return;
+  // the circle comes down with the finger and its arc turns with it, as in the browser
+  const y = Math.min(pullD * 0.75, 130); // ends below the header, not over its text
+  el.classList.add('pulling'); el.classList.toggle('ready', pullD >= PULL_PX);
+  el.style.transform = 'translate(-50%,' + y + 'px) rotate(' + Math.round(pullD * 2.2) + 'deg)';
+  el.style.opacity = String(Math.min(1, pullD / PULL_PX));
 }, { passive: true });
 addEventListener('touchend', () => {
-  const ptr = $('ptr'); if (ptr) { ptr.classList.remove('pulling', 'ready'); ptr.style.height = '0px'; }
+  const el = ptr();
   if (pullY !== null && pullD >= PULL_PX) refreshMissing();
+  else if (el && !el.classList.contains('spin')) { el.classList.remove('pulling', 'ready'); el.style.transform = ''; el.style.opacity = ''; }
+  if (el) el.style.opacity = '';
   pullY = null; pullD = 0;
 });
 // (no refresh on a page reload: the app reloads itself after every update, Tomi did not ask for that)
