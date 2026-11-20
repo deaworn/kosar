@@ -7,6 +7,7 @@ import { applyBrand as splitInto, moveBrand, learnBrands, learnable } from './br
 import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
+import { COUNTRIES, DEFAULT_PLACE, normalizePlace, placeKey, useItemPlace } from './shopping-place.js';
 import { parseAiInput, isStandalone, isSafari, chooseKeyBanner, keyStatusText } from './ai-key.js';
 import { selectMissing } from './refresh.js';
 import { guessLang } from './lang.js';
@@ -41,6 +42,10 @@ const safeUrl = (u) => (/^https:\/\//i.test(String(u || '')) ? String(u) : '');
 
 // ---- persistence --------------------------------------------------------------
 // bv.items is the v1 key and stays the same, so an update keeps the existing list.
+const LS_PLACE = 'bv.shoppingPlace';
+let settings = null;
+try { const raw = localStorage.getItem(LS_PLACE); if (raw) settings = normalizePlace(JSON.parse(raw)); } catch { /* default */ }
+let shoppingPlace = settings || DEFAULT_PLACE;
 const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 5;
 let items = {}, savedAt = 0;
 try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
@@ -84,7 +89,7 @@ function uid() {
 }
 
 function edit(id, patch) {
-  const it = items[id] || (items[id] = { id });
+  const it = items[id] || (items[id] = { id, offerPlace: placeKey(shoppingPlace) });
   Object.assign(it, patch);
   persist(); render(); kickEnrich();
 }
@@ -225,11 +230,14 @@ function iconHtml(it) {
     '<span class="ico' + (p?.own ? ' own' : '') + '">' + svg + img + '</span></button>';
 }
 
-const eur = (v) => Number(v).toFixed(2).replace('.', ',') + ' €';
+const forint = new Intl.NumberFormat('hu-HU', { maximumFractionDigits: 0 });
+const eur = (value) => COUNTRIES[shoppingPlace.country].currency === 'HUF'
+  ? forint.format(value) + ' Ft'
+  : Number(value).toFixed(2).replace('.', ',') + ' €';
 // "Aldi Süd 1,29 € / 200 g (11-18)": store, price, unit and the day it was read from the shop page.
 // a shop price always says its unit, or that the shop did not show one (Tomi 11003); own prices keep theirs
 // an online shop's price says so (shipping not added; Tomi 11104)
-function priceText(p, own = false) { return (p.store ? p.store + (p.online ? ' (online)' : '') + ' ' : '') + eur(p.value) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
+function priceText(p, own = false) { return (p.store ? p.store + (p.online ? ' (online)' : '') + ' ' : '') + eur(p.value) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (!own && p.inArea === false ? ' \u00b7 K\u00f6rzet n\u00e9lk\u00fcl' : '') + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
 // the cheapest online pharmacy next to the main price, when it is another page (round 11)
 const pharmacyNote = (of) => of?.pharmacy && of.price && of.pharmacy.url !== of.price.url ? of.pharmacy : null;
 function metaHtml(it) {
@@ -247,6 +255,7 @@ function metaHtml(it) {
     parts.push('<span class="price">' + esc(priceText(it.offer.price)) + '</span>');
     if (it.offer.picked && it.offer.price.base) parts.push('<span class="note">' + esc(it.offer.price.base) + '</span>');
   }
+  else if (it.offer?.locationUnavailable) parts.push('<span class="noprice">Ehhez a helyhez m\u00e9g nincs ellen\u0151rz\u00f6tt \u00e1rforr\u00e1s.</span>');
   else if (it.offer) parts.push('<span class="noprice">ár: nem találtam</span>');
   // Tomi's REWE price stays the main one; a cheaper verified shop is a note next to it
   if (!it.myPrice && it.offer?.price && it.offer?.alt) parts.push('<span class="note">olcsóbb: ' + esc(it.offer.alt.store + ' ' + eur(it.offer.alt.value)) + '</span>');
@@ -308,6 +317,7 @@ function reveal(id) {
 }
 
 function render() {
+  for (const item of Object.values(items)) useItemPlace(item, shoppingPlace);
   const all = visible(), total = all.length, done = all.filter((i) => i.done).length;
   $('ringtxt').textContent = done + '/' + total;
   $('bar').style.strokeDashoffset = String(150.8 * (1 - (total ? done / total : 0)));
@@ -361,7 +371,7 @@ window.addEventListener('popstate', () => { if (!$('zoom').hidden) closeZoom(); 
 // Typing suggests earlier (deleted) items and product candidates from the cache;
 // one tap brings back a deleted item or adds the item with the picked product.
 const typingCands = createTypingCandidates({
-  fetchCandidates: (text, opts) => ai.candidates(text, opts),
+  fetchCandidates: (text, opts) => ai.candidates(text, { ...opts, location: shoppingPlace }),
   onUpdate: () => renderSuggest(),
   isOnline: () => navigator.onLine,
   isConfigured: () => ai.configured(),
@@ -377,7 +387,7 @@ function renderSuggest() {
   const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
   if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
-  const tips = dictionaryTips(q);
+  const tips = dictionaryTips(q, shoppingPlace.country);
   const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
   const hits = Object.entries(hist).filter(([, h]) => ((h.hu || '') + ' ' + (h.de || '') + ' ' + (h.brand || '')).toLowerCase().includes(q))
     .sort((a, b) => (b[1].deletedAt || 0) - (a[1].deletedAt || 0)).slice(0, 4);
@@ -390,7 +400,7 @@ function renderSuggest() {
   const headHtml = matched ? '<div class="shead">' + esc(matched) + ':</div>' : '';
   const candHtml = cands.map((c, i) => {
     const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
-    const store = c.store + (c.online ? ' (online)' : '');
+    const store = c.store + (c.online ? ' (online)' : '') + (c.inArea === false ? ' \u00b7 K\u00f6rzet n\u00e9lk\u00fcl' : '');
     const sub = candidateUnitInfo(c);
     return '<button type="button" class="cand" data-cand="' + i + '">' + img +
       '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(store) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
@@ -409,7 +419,7 @@ $('inName').addEventListener('input', suggest);
 $('suggest').addEventListener('click', (ev) => {
   const tip = ev.target.closest('button[data-tip]');
   if (tip) {
-    const row = dictionaryTips($('inName').value)[Number(tip.dataset.tip)];
+    const row = dictionaryTips($('inName').value, shoppingPlace.country)[Number(tip.dataset.tip)];
     if (!row) return;
     const [hu, de, icon, cat] = row;
     const id = uid();
@@ -426,6 +436,7 @@ $('suggest').addEventListener('click', (ev) => {
     const c = st.candidates[Number(cbtn.dataset.cand)];
     if (!c) return;
     const it = addWithCandidate($('inName').value, c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates, matched: st.matched });
+    it.offerPlace = placeKey(shoppingPlace);
     items[it.id] = it;
     persist(); render(); reveal(it.id); kickEnrich();
     $('inName').value = ''; typingCands.clear();
@@ -549,7 +560,7 @@ $('edForm').addEventListener('submit', async () => {
     ...(!$('edVarWrap').hidden ? { variant: $('edVariant').value } : {}) };
   // own price: always wins over the machine's ("saját"); an empty field removes it
   const pv = Number($('edPrice').value.replace(',', '.').replace(/[^\d.]/g, ''));
-  const myPrice = pv > 0 && pv < 10000 ? { value: Math.round(pv * 100) / 100, store: $('edStore').value.trim().slice(0, 30), date: new Date().toISOString().slice(0, 10) } : null;
+  const myPrice = pv > 0 && pv < (shoppingPlace.country === 'hu' ? 1000000 : 10000) ? { value: Math.round(pv * 100) / 100, store: $('edStore').value.trim().slice(0, 30), date: new Date().toISOString().slice(0, 10) } : null;
   let id = editing;
   if (!id) { // new item from the scanner
     if (!v.hu && !v.de) { setStatus('Név nélkül nem mentettem.'); return; }
@@ -748,7 +759,9 @@ async function kickOffers() {
   try {
     for (const it of Object.values(items).filter(needsOffer).sort((a, b) => (b.order || 0) - (a.order || 0))) {
       it.offerAsked = Date.now();
-      const r = await ai.offer(it, { refresh: !!it.offerForce });
+      const scope = placeKey(shoppingPlace);
+      const r = await ai.offer(it, { refresh: !!it.offerForce, location: shoppingPlace });
+      if (scope !== placeKey(shoppingPlace)) break;
       if (!r) { reached = false; if (refreshRun) refreshRun.down = true; break; } // machine not reachable: try again later
       if (r.pending) { persist(); continue; }
       const now = items[it.id]; if (!now) continue;
@@ -917,6 +930,7 @@ $('imGo').addEventListener('click', async () => {
 });
 $('imCancel').addEventListener('click', () => $('importer').close());
 $('menuBtn').addEventListener('click', () => {
+  $('mPlaceSub').textContent = COUNTRIES[shoppingPlace.country].label + ' \u00b7 ' + shoppingPlace.place;
   $('mAiKeySub').textContent = keyStatusText(ai.configured());
   $('aiState').textContent = ai.configured() ? 'AI-segéd (gép): ellenőrzés…' : 'AI-segéd (gép): nincs beállítva';
   $('menu').showModal();
@@ -925,6 +939,30 @@ $('menuBtn').addEventListener('click', () => {
 $('menuClose').addEventListener('click', () => $('menu').close());
 $('mImport').addEventListener('click', () => openImport());
 $('mHistory').addEventListener('click', openHistory);
+function openShoppingPlace() {
+  $('placeCountry').value = shoppingPlace.country;
+  $('placeName').value = shoppingPlace.place;
+  $('placeRadius').value = shoppingPlace.radius;
+  $('shoppingPlace').showModal();
+}
+$('mPlace').addEventListener('click', () => { $('menu').close(); openShoppingPlace(); });
+$('placeCountry').addEventListener('change', () => {
+  $('placeName').value = $('placeCountry').value === shoppingPlace.country ? shoppingPlace.place : '';
+});
+$('placeCancel').addEventListener('click', () => $('shoppingPlace').close());
+$('placeForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const next = normalizePlace({ country: $('placeCountry').value, place: $('placeName').value, radius: Number($('placeRadius').value) });
+  if (!next) { $('placeName').focus(); return; }
+  try { localStorage.setItem(LS_PLACE, JSON.stringify(next)); }
+  catch { setStatus('A v\u00e1s\u00e1rl\u00e1si helyet nem siker\u00fclt elmenteni.'); return; }
+  shoppingPlace = settings = next;
+  $('shoppingPlace').close();
+  typingCands.clear();
+  render();
+  persist();
+  kickOffers();
+});
 $('mAiKey').addEventListener('click', openAiKeyDialog);
 $('mBackup').addEventListener('click', async () => {
   $('menu').close();
@@ -1155,6 +1193,7 @@ function review(force = false) {
 setInterval(() => { if (!document.hidden) review(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) review(); });
 render(); setNet(); hashImport(); renderKeyBanners();
+if (!settings && !$("importer").open) openShoppingPlace();
 loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); review(true); });
 
 if ('serviceWorker' in navigator) {

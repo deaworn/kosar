@@ -69,14 +69,19 @@ export function editDistance(a, b) {
 const TIP_NAMES = new Map(TIP_DICT.map(entry => [entry[0], new Set([cleanAscii(entry[0]), cleanAscii(entry[1])])]));
 for (const [alias, target] of Object.entries(TIP_ALIASES)) TIP_NAMES.get(target)?.add(cleanAscii(alias));
 
-export function dictionaryTips(text) {
+const TIP_INDEX_BY_COUNTRY = new Map(['de', 'at', 'hu'].map(country => [country, new Map(
+  [...TIP_NAMES].map(([name, terms]) => [country + '|' + name, terms]))]));
+
+export function dictionaryTips(text, country = 'de') {
   const query = cleanAscii(text);
   if (query.length < 2) return [];
   const tolerance = query.length >= 6 ? 2 : query.length >= 3 ? 1 : 0;
   const ranked = [];
+  const index = TIP_INDEX_BY_COUNTRY.get(country);
+  if (!index) return [];
   for (const entry of TIP_DICT) {
     let score = Infinity;
-    for (const name of TIP_NAMES.get(entry[0])) {
+    for (const name of index.get(country + '|' + entry[0])) {
       if (name === query) score = 0;
       else if (name.startsWith(query)) score = Math.min(score, 1 + name.length / 1000);
       else if (tolerance && Math.abs(name.length - query.length) <= tolerance + 4) {
@@ -331,6 +336,7 @@ export function toCandidate(v, learned = []) {
     unit: String(v.unitBase || v.unitPriceUnit || '').trim(),
     text: String(v.unitPriceText || '').trim() || (Number(v.unitPrice).toFixed(2).replace('.', ',') + ' €' + (v.unitBase ? ' / ' + v.unitBase : '')),
   } : null);
+  const currency = p?.currency || v.currency;
   const image = String(link.image ?? v.image ?? '').trim();
   const date = String(p?.date || v.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   const online = !!(p?.online || v.online);
@@ -342,11 +348,15 @@ export function toCandidate(v, learned = []) {
     unit,
     unitPrice: up ? up.value : null,
     unitBase: up ? up.unit : '',
-    unitPriceText: up ? up.text : base,
+    unitPriceText: up && currency === 'HUF'
+      ? new Intl.NumberFormat('hu-HU', { maximumFractionDigits: 0 }).format(up.value) + ' Ft / ' + up.unit
+      : up ? up.text : base,
     image,
     url,
     date,
     ...(online ? { online: true } : {}),
+    ...((p?.inArea ?? v.inArea) === false ? { inArea: false } : {}),
+    ...(currency ? { currency } : {}),
   };
 }
 
@@ -461,6 +471,8 @@ export function pickCandidate(it, cand, learned = [], keys = null) {
       date: c.date || new Date(now).toISOString().slice(0, 10),
       url: c.url || '',
       ...(c.online ? { online: true } : {}),
+      ...(c.inArea === false ? { inArea: false } : {}),
+      ...(c.currency ? { currency: c.currency } : {}),
     },
   };
   if (it.enrich) {

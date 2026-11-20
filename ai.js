@@ -93,12 +93,12 @@ export const name = (hu, de) => safe('/name', { hu, de }, 55000);
 export const nameAny = (text) => safe('/name', { text }, 55000);
 // Verified link + store price. Returns the result, { pending: true } while the machine searches, or null.
 // refresh: the pull-down asked again (the machine re-searches an older answer without a price)
-export async function offer(it, { refresh = false } = {}) {
-  const r = await safe('/offer', { hu: it.hu || '', de: it.de || '', brand: it.brand || '', barcode: it.barcode || '', ...(refresh ? { refresh: true } : {}) }, 30000);
+export async function offer(it, { refresh = false, location } = {}) {
+  const r = await safe('/offer', { hu: it.hu || '', de: it.de || '', brand: it.brand || '', barcode: it.barcode || '', location, ...(refresh ? { refresh: true } : {}) }, 30000);
   return r;
 }
 // Instant product candidates while typing from the server cache, or { pending: true } while searching.
-export const candidates = (text, { settled = false, search = false } = {}) => safe('/candidates', { text: String(text || '').trim(), ...(settled || search ? { settled: true } : {}) }, 20000);
+export const candidates = (text, { settled = false, search = false, location } = {}) => safe('/candidates', { text: String(text || '').trim(), location, ...(settled || search ? { settled: true } : {}) }, 20000);
 export async function status() {
   if (!cfg.token) return 'nincs beállítva';
   if (!navigator.onLine) return 'net nélkül nem elérhető';

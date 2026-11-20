@@ -95,6 +95,7 @@
 
 <dialog id="menu" aria-label="Menü">
   <div class="menulist">
+    <button type="button" class="mitem" id="mPlace"><b>Vásárlási hely</b><span id="mPlaceSub"></span></button>
     <button type="button" class="mitem" id="mHistory"><b>Korábbi tételek</b><span>törölt tételek visszahívása egy koppintással</span></button>
     <button type="button" class="mitem" id="mImport"><b>Lista importálása</b><span>régi lista beillesztése vagy fájlból</span></button>
     <button type="button" class="mitem" id="mBackup"><b>Biztonsági mentés</b><span>a lista fájlba vagy megosztásba (pl. magadnak Telegramon)</span></button>
@@ -103,6 +104,26 @@
     <p class="mnote">A lista csak ezen a telefonon van, nincs szerver és nincs fiók. Net nélkül is működik; a német név, fotó és ár-becslés netre vár.</p>
     <button type="button" class="ghost" id="menuClose">Bezárás</button>
   </div>
+</dialog>
+
+<dialog id="shoppingPlace" aria-labelledby="placeTitle">
+  <form id="placeForm">
+    <h2 id="placeTitle">Vásárlási hely</h2>
+    <label>Ország
+      <select id="placeCountry"><option value="de">Németország</option><option value="at">Ausztria</option><option value="hu">Magyarország</option></select>
+    </label>
+    <label>Irányítószám vagy város
+      <input id="placeName" required maxlength="100" autocomplete="off">
+    </label>
+    <label>Körzet
+      <select id="placeRadius"><option value="0">Csak a város</option><option value="5">5 km</option><option value="10">10 km</option><option value="25">25 km</option></select>
+    </label>
+    <p class="note">Ha egy bolt ára nem köthető üzlethez, „Körzet nélkül” jelölést kap.</p>
+    <div class="edbtns"><span class="grow"></span>
+      <button class="ghost" id="placeCancel" type="button">Mégse</button>
+      <button class="primary" type="submit">Mentés</button>
+    </div>
+  </form>
 </dialog>
 
 <dialog id="importer" aria-labelledby="imTitle">
