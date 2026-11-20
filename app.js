@@ -7,6 +7,7 @@ import { applyBrand as splitInto, moveBrand, learnBrands, learnable } from './br
 import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
+import { selectMissing, summarize, summaryText } from './refresh.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
@@ -196,7 +197,7 @@ async function kickEnrich() {
       else { Object.assign(now, res.patch); relabel(now, [now.enrich?.brand?.value]); } // the AI may have read a brand from the name
       persist(); render();
     }
-  } finally { enriching = false; enrichCount = 0; setNet(); }
+  } finally { enriching = false; enrichCount = 0; setNet(); setTimeout(refreshTick, 0); } // later: may run during start-up
 }
 
 function setNet() {
@@ -602,7 +603,7 @@ async function kickRecognize() {
 const OFFER_TTL = 3 * 864e5, OFFER_POLL_MS = 60000;
 // a function declaration: the start-up migration (above) already needs it
 function offerKey(it) { return [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase(); }
-const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (!it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
+const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (it.offerForce || !it.offer || it.offer.key !== offerKey(it) || Date.now() - (it.offer.at || 0) > OFFER_TTL ||
   (it.offer.link && !it.offer.link.image && !pics(it) && Date.now() - (it.offer.at || 0) > 3600e3) ||
   // no price yet: ask again after an hour (the machine may have found one since; Tomi 11000)
   (!it.offer.price && Date.now() - (it.offer.at || 0) > 3600e3) ||
@@ -613,19 +614,98 @@ let offering = false;
 async function kickOffers() {
   if (offering || !ai.configured() || !navigator.onLine) return;
   offering = true;
+  let reached = true;
   try {
     for (const it of Object.values(items).filter(needsOffer).sort((a, b) => (b.order || 0) - (a.order || 0))) {
       it.offerAsked = Date.now();
-      const r = await ai.offer(it);
-      if (!r) break; // machine not reachable: try again later
+      const r = await ai.offer(it, { refresh: !!it.offerForce });
+      if (!r) { reached = false; if (refreshRun) refreshRun.down = true; break; } // machine not reachable: try again later
       if (r.pending) { persist(); continue; }
       const now = items[it.id]; if (!now) continue;
       now.offer = mergeOffer(now.offer, offerKey(now), r);
+      delete now.offerForce;
       relabel(now); // the verified shop page names the brand: take it out of the name
-      persist(); render();
+      persist(); render(); refreshTick();
     }
-  } finally { offering = false; }
+  } finally {
+    offering = false;
+    // items forced meanwhile (pull-down) were not in this round's list: one more round (offerAsked throttles)
+    if (reached && Object.values(items).some(needsOffer)) setTimeout(kickOffers, 1000);
+  }
 }
+
+// ---- pull-down refresh (Tomi 11102) -------------------------------------------------
+// Pull the list down at the top: the items still missing a German name, picture or price
+// are sent to the machine again. A banner says how many, and at the end what was found
+// and what is still missing. Rules (which items, cool-down): site/refresh.js.
+const REFRESH_MAX_MS = 12 * 60e3;
+let refreshRun = null, refreshHide = null;
+// (elements may be missing for a moment while an update swaps the page: never fail on that)
+const hideRefresh = () => { if ($('refresh')) $('refresh').hidden = true; };
+function showRefresh(text, busy) {
+  clearTimeout(refreshHide);
+  const box = $('refresh'); if (!box) return;
+  $('refreshTxt').textContent = text; box.hidden = false; box.classList.toggle('busy', !!busy);
+}
+$('refreshClose')?.addEventListener('click', hideRefresh);
+function refreshMissing() {
+  if (refreshRun) { showRefresh(refreshText(), true); return; }
+  if (!navigator.onLine) { showRefresh('Nincs net: most nem tudok keresni. Ha lesz net, a hiányos tételeket magamtól újrakeresem.'); return; }
+  const { todo, waiting } = selectMissing(items, pics);
+  const wait = waiting.length ? ' (' + waiting.length + ' tételt pár perce kerestem, azt most kihagyom.)' : '';
+  if (!todo.length) { showRefresh((waiting.length ? 'Nincs új keresnivaló.' : 'Minden tétel rendben, nincs hiányos.') + wait); refreshHide = setTimeout(hideRefresh, 8000); return; }
+  const now = Date.now();
+  for (const t of todo) {
+    const it = items[t.id];
+    it.refreshAt = now;
+    if (t.parts.includes('ár') || t.parts.includes('kép')) { it.offerForce = true; it.offerAsked = 0; }
+    if (t.parts.includes('német név') && it.enrich) { it.enrich.complete = false; it.enrich.at = 0; }
+  }
+  persist();
+  refreshRun = { todo, start: now, wait, down: false };
+  showRefresh(refreshText(), true);
+  if (!ai.configured()) refreshRun.down = true;
+  kickEnrich(); kickOffers(); refreshTick();
+}
+function refreshPending() {
+  return refreshRun.todo.filter((t) => { const it = items[t.id]; return it && (it.offerForce || (it.enrich && !it.enrich.complete)); });
+}
+function refreshText() {
+  const n = refreshRun.todo.length, open = refreshPending().length;
+  return n + ' hiányos tétel, újrakeresem… (' + (n - open) + '/' + n + ' kész)' + refreshRun.wait;
+}
+function refreshTick() {
+  if (!refreshRun) return;
+  const open = refreshPending().length;
+  const over = Date.now() - refreshRun.start > REFRESH_MAX_MS;
+  if (open && !over && !refreshRun.down) { showRefresh(refreshText(), true); return; }
+  const s = summarize(refreshRun, items, pics);
+  const tail = refreshRun.down && open ? ' A gép most nem érhető el, később magától újra próbálom.' : over && open ? ' A keresés még fut a gépen; ha meglesz, magától megjelenik.' : '';
+  refreshRun = null;
+  showRefresh(summaryText(s) + tail);
+  refreshHide = setTimeout(hideRefresh, 30000);
+}
+setInterval(() => { if (refreshRun) refreshTick(); }, 5000);
+// The gesture: at the top of the page, pull down at least PULL_PX and let go.
+const PULL_PX = 80;
+let pullY = null, pullD = 0;
+const anyOpen = () => [...document.querySelectorAll('dialog')].some((d) => d.open);
+addEventListener('touchstart', (e) => { pullY = scrollY <= 0 && !anyOpen() && e.touches.length === 1 && !e.target.closest('.addbar,.suggest') ? e.touches[0].clientY : null; pullD = 0; }, { passive: true });
+addEventListener('touchmove', (e) => {
+  if (pullY === null) return;
+  pullD = Math.max(0, e.touches[0].clientY - pullY);
+  if (scrollY > 0) { pullY = null; pullD = 0; }
+  const h = Math.min(pullD * 0.5, 64), ptr = $('ptr'); if (!ptr) return;
+  ptr.classList.add('pulling'); ptr.style.height = h + 'px';
+  ptr.classList.toggle('ready', pullD >= PULL_PX);
+  $('ptrTxt').textContent = pullD >= PULL_PX ? 'Engedd el: újrakeresem a hiányosakat' : 'Húzd le: a hiányos tételeket újrakeresem';
+}, { passive: true });
+addEventListener('touchend', () => {
+  const ptr = $('ptr'); if (ptr) { ptr.classList.remove('pulling', 'ready'); ptr.style.height = '0px'; }
+  if (pullY !== null && pullD >= PULL_PX) refreshMissing();
+  pullY = null; pullD = 0;
+});
+// (no refresh on a page reload: the app reloads itself after every update, Tomi did not ask for that)
 
 // ---- clear done ---------------------------------------------------------------
 $('clearBtn').addEventListener('click', () => { $('confirmWrap').hidden = false; $('clearBtn').hidden = true; });

@@ -65,6 +65,16 @@ ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .primary{background:var(--accent);color:var(--accent-ink);border:0;border-radius:999px;padding:9px 18px;font:inherit;font-weight:700;cursor:pointer}
 .note{color:var(--muted);font-size:.85rem}
 .status{font-size:.82rem;color:var(--muted);margin-top:10px;min-height:1.2em}
+/* pull-down refresh (Tomi 11102): our own gesture, so the browser does not reload the page */
+html,body{overscroll-behavior-y:contain}
+.ptr{height:0;overflow:hidden;display:flex;align-items:flex-end;justify-content:center;color:var(--muted);font-size:.82rem;transition:height .2s}
+.ptr.pulling{transition:none}
+.ptr.ready{color:var(--accent)}
+.ptr span{padding-bottom:10px}
+.refresh{display:flex;align-items:flex-start;gap:8px;margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card);font-size:.85rem;line-height:1.35}
+.refresh span{flex:1}
+.refresh.busy{border-color:var(--accent)}
+.refresh button{padding:2px 8px;flex:none}
 .addbar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--bg);border-top:1px solid var(--line);
   padding:10px max(16px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px))}
 .addbar form{max-width:520px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr auto;gap:8px}

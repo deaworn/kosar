@@ -73,8 +73,9 @@ async function safe(path, body, timeoutMs) {
 export const recognize = (dataUrl) => safe('/recognize', { image: dataUrl }, 75000);
 export const name = (hu, de) => safe('/name', { hu, de }, 55000);
 // Verified link + store price. Returns the result, { pending: true } while the machine searches, or null.
-export async function offer(it) {
-  const r = await safe('/offer', { hu: it.hu || '', de: it.de || '', brand: it.brand || '', barcode: it.barcode || '' }, 30000);
+// refresh: the pull-down asked again (the machine re-searches an older answer without a price)
+export async function offer(it, { refresh = false } = {}) {
+  const r = await safe('/offer', { hu: it.hu || '', de: it.de || '', brand: it.brand || '', barcode: it.barcode || '', ...(refresh ? { refresh: true } : {}) }, 30000);
   return r;
 }
 export async function status() {
