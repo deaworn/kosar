@@ -74,7 +74,7 @@ for (const [alias, target] of Object.entries(TIP_ALIASES)) TIP_NAMES.get(target)
 const TIP_INDEX_BY_COUNTRY = new Map(['de', 'at', 'hu'].map(country => [country, new Map(
   [...TIP_NAMES].map(([name, terms]) => [country + '|' + name, terms]))]));
 
-export function dictionaryTips(text, country = 'de', { allowFuzzy = true } = {}) {
+export function dictionaryTips(text, country = 'de') {
   const query = cleanAscii(text);
   const index = TIP_INDEX_BY_COUNTRY.get(country);
   if (query.length < 2 || !index) return [];
@@ -89,20 +89,19 @@ export function dictionaryTips(text, country = 'de', { allowFuzzy = true } = {})
       break;
     }
   }
-  if (prefixes.length) {
-    return prefixes.sort((a, b) => a.priority - b.priority || a.length - b.length)
-      .slice(0, 3).map(({ entry }) => entry);
-  }
+  prefixes.sort((a, b) => a.priority - b.priority || a.length - b.length);
+  const exact = prefixes.slice(0, 3).map(({ entry }) => entry);
 
   const letters = letterCount(query);
-  if (!allowFuzzy || letters < 5) return [];
-  const tolerance = letters >= 6 ? 2 : 1;
+  if (letters < 3 || exact.length === 3) return exact;
+  const tolerance = letters >= 5 ? 2 : 1;
+  const exactNames = new Set(exact.map(([hu]) => hu));
   const fuzzy = [];
   for (const entry of TIP_DICT) {
-    const { hu, aliases, de } = index.get(country + '|' + entry[0]);
+    if (exactNames.has(entry[0])) continue;
+    const { hu, aliases } = index.get(country + '|' + entry[0]);
     let score = Infinity;
-    for (const name of [hu, ...aliases, de]) {
-      if (Math.abs(name.length - query.length) > tolerance + 4) continue;
+    for (const name of [hu, ...aliases]) {
       for (let len = query.length - tolerance; len <= Math.min(name.length, query.length + tolerance); len++) {
         const distance = editDistance(query, name.slice(0, len));
         if (distance <= tolerance) score = Math.min(score, distance + Math.abs(len - query.length) / 10);
@@ -110,7 +109,7 @@ export function dictionaryTips(text, country = 'de', { allowFuzzy = true } = {})
     }
     if (Number.isFinite(score)) fuzzy.push({ entry, score });
   }
-  return fuzzy.sort((a, b) => a.score - b.score).slice(0, 3).map(({ entry }) => entry);
+  return exact.concat(fuzzy.sort((a, b) => a.score - b.score).slice(0, 3 - exact.length).map(({ entry }) => entry));
 }
 
 export function ownItemTips(text, items, history) {

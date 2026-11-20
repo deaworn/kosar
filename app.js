@@ -392,7 +392,7 @@ function renderSuggest() {
   const box = $('suggest');
   if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
   const hits = ownItemTips(q, items, hist);
-  const tips = dictionaryTips(q, shoppingPlace.country, { allowFuzzy: !hits.length });
+  const tips = dictionaryTips(q, shoppingPlace.country);
   const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
   const histHtml = hits.map(({ id, item: h, inList }) => {
     const variant = chosenVariant(h)?.name;
@@ -430,9 +430,7 @@ $('suggest').addEventListener('click', (ev) => {
   const tip = ev.target.closest('button[data-tip]');
   if (tip) {
     const query = $('inName').value;
-    const row = dictionaryTips(query, shoppingPlace.country, {
-      allowFuzzy: !ownItemTips(query, items, hist).length,
-    })[Number(tip.dataset.tip)];
+    const row = dictionaryTips(query, shoppingPlace.country)[Number(tip.dataset.tip)];
     if (!row) return;
     const [hu, de, icon, cat] = row;
     const id = uid();
