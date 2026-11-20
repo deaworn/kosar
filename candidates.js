@@ -4,14 +4,47 @@
 // One tap on the phone picks a candidate: the item gets that product's name, brand, price, store,
 // link and image. Until picked, the item works as a plain list entry.
 // Pure: shared by the phone (site/app.js), the helper (ai/offers.mjs), and Node tests.
-import { DICT } from './dictionary.js';
-import { splitBrand, learnable } from './brand.js';
+import { DICT, lookup } from './dictionary.js';
+import { applyBrand, splitBrand, learnable } from './brand.js';
+import { guessLang } from './lang.js';
 import { shopName } from './name-check.js';
 import { unitLabel } from './units.js';
 
 const fold = (s) => String(s || '').toLowerCase().normalize('NFC').replace(/\s+/g, ' ').trim();
+const asciiFold = (s) => fold(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
 const DICT_HU = new Set(DICT.map((e) => fold(e[0])).filter(Boolean));
 const DICT_DE = new Set(DICT.map((e) => fold(e[1])).filter(Boolean));
+
+// Resolves typed text (Hungarian or German, with or without accents) into { hu, de, brand }
+// so that typing "Kenyér", "kenyer", "Brot", or "brot" all hit the same cache key.
+export function candidateItem(text, learned = []) {
+  const clean = String(text ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120);
+  if (!clean) return { hu: '', de: '', brand: '' };
+  const r = applyBrand({ hu: clean, de: '', brand: '' }, learned);
+  const q = r.hu.trim();
+  if (!q) return { hu: '', de: '', brand: r.brand || '' };
+  const fq = fold(q), aq = asciiFold(q);
+  // 1. Exact dictionary match (Hungarian or German)
+  const exactHu = DICT.find((e) => fold(e[0]) === fq);
+  if (exactHu) return { hu: exactHu[0], de: exactHu[1], brand: r.brand || '' };
+  const exactDe = DICT.find((e) => fold(e[1]) === fq);
+  if (exactDe) return { hu: exactDe[0], de: exactDe[1], brand: r.brand || '' };
+  // 2. Accent-folded dictionary match ("kenyer" -> "kenyér" / "Brot", "tojas" -> "tojás" / "Eier")
+  const foldedHit = DICT.find((e) => asciiFold(e[0]) === aq || asciiFold(e[1]) === aq);
+  if (foldedHit) return { hu: foldedHit[0], de: foldedHit[1], brand: r.brand || '' };
+  // 3. German singular/plural dictionary match ("Banane" -> "Bananen", "Kartoffel" -> "Kartoffeln")
+  if (fq.length >= 4) {
+    const pluralHit = DICT.find((e) => {
+      const fd = fold(e[1]), ad = asciiFold(e[1]);
+      return fd === fq + 'n' || fd === fq + 'en' || fd === fq + 's' || ad === aq + 'n' || ad === aq + 'en';
+    });
+    if (pluralHit) return { hu: pluralHit[0], de: pluralHit[1], brand: r.brand || '' };
+  }
+  // 4. Non-dictionary phrase: detect language offline
+  const lang = guessLang(q);
+  if (lang === 'de') return { hu: '', de: q, brand: r.brand || '' };
+  return { hu: q, de: '', brand: r.brand || '' };
+}
 
 // Known product-line names that name a specific product even without the brand word next to them.
 const SPECIFIC_LINES = /\b(soft cake|american sandwich|alpenmilch|goldbären|goldbaeren|milchbären|milchbaeren|jaffa-schnitten|traube-nuss)\b/i;
@@ -245,7 +278,13 @@ export function pickCandidate(it, cand, learned = [], keys = null) {
   if (prodDe) it.de = prodDe;
   if (brand) it.brand = brand;
   const prevOffer = it.offer || {};
+  const now = Date.now();
   it.offer = {
+    at: prevOffer.at || now,
+    checked: prevOffer.checked || new Date(now).toISOString(),
+    pharmacy: prevOffer.pharmacy ?? null,
+    variants: prevOffer.variants ?? null,
+    candidates: prevOffer.candidates ?? null,
     ...prevOffer,
     picked: true,
     alt: null,
@@ -262,7 +301,7 @@ export function pickCandidate(it, cand, learned = [], keys = null) {
       store: c.store || '',
       unit: c.unit || '',
       base: c.unitPriceText || '',
-      date: c.date || new Date().toISOString().slice(0, 10),
+      date: c.date || new Date(now).toISOString().slice(0, 10),
       url: c.url || '',
       ...(c.online ? { online: true } : {}),
     },
@@ -273,4 +312,108 @@ export function pickCandidate(it, cand, learned = [], keys = null) {
   }
   if (keys?.offer) it.offer.key = keys.offer(it);
   return true;
+}
+
+// Builds a new shopping-list item directly from typed text and a picked candidate from the
+// while-typing dropdown (Tomi 11244: one tap adds the item with name, brand, price, store, unit price, image).
+export function addWithCandidate(text, cand, { id = '', now = Date.now(), learned = [], keys = null, candidates = null } = {}) {
+  const base = candidateItem(text, learned);
+  const hit = lookup(base.hu, 'hu') || lookup(base.de, 'de');
+  const it = {
+    ...(id ? { id } : {}),
+    hu: base.hu || (hit ? hit[0] : ''),
+    de: base.de || (hit ? hit[1] : ''),
+    qty: '',
+    brand: base.brand || '',
+    group: 'kell',
+    done: false,
+    order: now,
+    ...(hit?.[2] ? { icon: hit[2] } : {}),
+  };
+  if (it.hu) {
+    it.enrich = {
+      key: keys?.enrich ? keys.enrich(it.hu, it.de) : '',
+      at: now,
+      complete: true,
+      autoVals: it.de ? { de: it.de } : {},
+      sources: { translation: hit ? 'szótár' : 'bolti termék' },
+      ...(hit ? { icon: hit[2], category: hit[3] } : {}),
+    };
+  }
+  if (Array.isArray(candidates) && candidates.length) {
+    it.offer = {
+      at: now,
+      checked: new Date(now).toISOString(),
+      pharmacy: null,
+      variants: null,
+      candidates: sortCandidates(candidates, learned).slice(0, 8),
+    };
+  }
+  pickCandidate(it, cand, learned, keys);
+  return it;
+}
+
+// Debounced while-typing candidate lookup controller (~500 ms debounce, min 3 chars, max 6 rows,
+// polls a few times on 202 pending, silent offline fallback, never blocks typing).
+export function createTypingCandidates({
+  fetchCandidates,
+  onUpdate = () => {},
+  isOnline = () => true,
+  isConfigured = () => true,
+  learned = () => [],
+  debounceMs = 500,
+  pollMs = 12000,
+  maxPolls = 4,
+  minChars = 3,
+  maxRows = 6,
+} = {}) {
+  let seq = 0, debounceTimer = null, pollTimer = null;
+  let state = { text: '', candidates: [], pending: false };
+  const stopTimers = () => {
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  };
+  const setState = (next) => { state = next; onUpdate(state); };
+
+  async function run(text, mySeq, pollIndex) {
+    if (mySeq !== seq || !isOnline() || !isConfigured()) return;
+    let res = null;
+    try { res = await fetchCandidates(text); } catch { res = null; }
+    if (mySeq !== seq) return;
+    if (!res) {
+      setState({ text, candidates: [], pending: false });
+      return;
+    }
+    if (Array.isArray(res.candidates)) {
+      const list = sortCandidates(res.candidates, learned()).slice(0, maxRows);
+      setState({ text, candidates: list, pending: false });
+      return;
+    }
+    if (res.pending && pollIndex < maxPolls) {
+      setState({ text, candidates: [], pending: true });
+      pollTimer = setTimeout(() => { pollTimer = null; run(text, mySeq, pollIndex + 1); }, pollMs);
+      return;
+    }
+    setState({ text, candidates: [], pending: false });
+  }
+
+  return {
+    input(rawText) {
+      seq++;
+      stopTimers();
+      const text = String(rawText ?? '').trim();
+      if (text.length < minChars || !isOnline() || !isConfigured()) {
+        setState({ text, candidates: [], pending: false });
+        return;
+      }
+      const mySeq = seq;
+      debounceTimer = setTimeout(() => { debounceTimer = null; run(text, mySeq, 0); }, debounceMs);
+    },
+    clear() {
+      seq++;
+      stopTimers();
+      setState({ text: '', candidates: [], pending: false });
+    },
+    getState: () => state,
+  };
 }

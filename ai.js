@@ -80,6 +80,8 @@ export async function offer(it, { refresh = false } = {}) {
   const r = await safe('/offer', { hu: it.hu || '', de: it.de || '', brand: it.brand || '', barcode: it.barcode || '', ...(refresh ? { refresh: true } : {}) }, 30000);
   return r;
 }
+// Instant product candidates while typing from the server cache, or { pending: true } while searching.
+export const candidates = (text) => safe('/candidates', { text: String(text || '').trim() }, 20000);
 export async function status() {
   if (!cfg.token) return 'nincs beállítva';
   if (!navigator.onLine) return 'net nélkül nem elérhető';

@@ -13,7 +13,7 @@ import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
-import { activeCandidates, candidateTitle, candidateUnitInfo, pickCandidate, sortCandidates } from './candidates.js';
+import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, pickCandidate, sortCandidates } from './candidates.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -201,7 +201,7 @@ async function kickEnrich() {
       else { Object.assign(now, res.patch); relabel(now, [now.enrich?.brand?.value]); } // the AI may have read a brand from the name
       persist(); render();
     }
-  } finally { enriching = false; enrichCount = 0; setNet(); setTimeout(refreshTick, 0); } // later: may run during start-up
+  } finally { enriching = false; enrichCount = 0; setNet(); setTimeout(() => { kickOffers(); refreshTick(); }, 0); } // later: may run during start-up
 }
 
 function setNet() {
@@ -242,7 +242,10 @@ function metaHtml(it) {
   const pv = !it.myPrice && chosenVariant(it), nv = it.offer?.variants?.length || 0;
   if (it.myPrice) parts.push('<span class="price">' + esc(priceText(it.myPrice, true)) + '</span> <span class="tag">saját</span>');
   else if (pv) parts.push('<span class="price">' + esc(shortName(pv.name, it.brand) + ': ' + priceText(pv)) + '</span>');
-  else if (it.offer?.price) parts.push('<span class="price">' + esc(priceText(it.offer.price)) + '</span>');
+  else if (it.offer?.price) {
+    parts.push('<span class="price">' + esc(priceText(it.offer.price)) + '</span>');
+    if (it.offer.picked && it.offer.price.base) parts.push('<span class="note">' + esc(it.offer.price.base) + '</span>');
+  }
   else if (it.offer) parts.push('<span class="noprice">ár: nem találtam</span>');
   // Tomi's REWE price stays the main one; a cheaper verified shop is a note next to it
   if (!it.myPrice && it.offer?.price && it.offer?.alt) parts.push('<span class="note">olcsóbb: ' + esc(it.offer.alt.store + ' ' + eur(it.offer.alt.value)) + '</span>');
@@ -354,20 +357,65 @@ $('zoom').addEventListener('click', () => history.back());
 window.addEventListener('popstate', () => { if (!$('zoom').hidden) closeZoom(); });
 
 // ---- add ----------------------------------------------------------------------
-// Typing suggests earlier (deleted) items; one tap brings one back with everything.
-function suggest() {
+// Typing suggests earlier (deleted) items and product candidates from the cache;
+// one tap brings back a deleted item or adds the item with the picked product.
+const typingCands = createTypingCandidates({
+  fetchCandidates: (text) => ai.candidates(text),
+  onUpdate: () => renderSuggest(),
+  isOnline: () => navigator.onLine,
+  isConfigured: () => ai.configured(),
+  learned,
+  debounceMs: 500,
+  pollMs: 12000,
+  maxPolls: 4,
+  minChars: 3,
+  maxRows: 6,
+});
+function renderSuggest() {
   const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
-  if (q.length < 2) { box.hidden = true; return; }
+  if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
   const hits = Object.entries(hist).filter(([, h]) => ((h.hu || '') + ' ' + (h.de || '') + ' ' + (h.brand || '')).toLowerCase().includes(q))
     .sort((a, b) => (b[1].deletedAt || 0) - (a[1].deletedAt || 0)).slice(0, 4);
-  box.innerHTML = hits.map(([id, h]) => '<button type="button" class="sug" data-id="' + esc(id) + '"><b>' + esc(h.hu || h.de) + '</b><span>' + esc([h.de && h.hu ? h.de : '', h.brand].filter(Boolean).join(' · ')) + '</span><i>korábbi</i></button>').join('');
-  box.hidden = !hits.length;
+  const histHtml = hits.map(([id, h]) => '<button type="button" class="sug" data-id="' + esc(id) + '"><b>' + esc(h.hu || h.de) + '</b><span>' + esc([h.de && h.hu ? h.de : '', h.brand].filter(Boolean).join(' · ')) + '</span><i>korábbi</i></button>').join('');
+  const st = typingCands.getState();
+  const match = q.length >= 3 && st.text.toLowerCase() === q;
+  const cands = match ? st.candidates : [];
+  const pending = match && st.pending && !cands.length && navigator.onLine;
+  const candHtml = cands.map((c, i) => {
+    const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
+    const store = c.store + (c.online ? ' (online)' : '');
+    const sub = candidateUnitInfo(c);
+    return '<button type="button" class="cand" data-cand="' + i + '">' + img +
+      '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(store) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
+      (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
+      '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
+  }).join('');
+  const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
+  box.innerHTML = histHtml + candHtml + pendHtml;
+  box.hidden = !hits.length && !cands.length && !pending;
+}
+function suggest() {
+  typingCands.input($('inName').value);
+  renderSuggest();
 }
 $('inName').addEventListener('input', suggest);
 $('suggest').addEventListener('click', (ev) => {
+  const cbtn = ev.target.closest('button[data-cand]');
+  if (cbtn) {
+    const st = typingCands.getState();
+    const c = st.candidates[Number(cbtn.dataset.cand)];
+    if (!c) return;
+    const it = addWithCandidate($('inName').value, c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates });
+    items[it.id] = it;
+    persist(); render(); reveal(it.id); kickEnrich();
+    $('inName').value = ''; typingCands.clear();
+    setStatus('Felírva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
+    $('inName').focus();
+    return;
+  }
   const b = ev.target.closest('button.sug'); if (!b) return;
-  restore(b.dataset.id); $('inName').value = ''; $('suggest').hidden = true;
+  restore(b.dataset.id); $('inName').value = ''; typingCands.clear();
 });
 function openHistory() {
   if ($('menu').open) $('menu').close();
@@ -392,7 +440,7 @@ $('addForm').addEventListener('submit', (e) => {
   const lang = guessLang(r.hu);
   if (lang === 'de') { r.de = r.hu; r.hu = ''; } else if (!lang) r.langCheck = true;
   const nid = uid(); edit(nid, r); reveal(nid);
-  $('inName').value = ''; $('suggest').hidden = true;
+  $('inName').value = ''; typingCands.clear();
   setStatus('Felírva: ' + (r.hu || r.de) + (r.brand ? ' (márka: ' + r.brand + ')' : '') + (navigator.onLine ? '' : ' (a német név és a fotó netre vár)'));
   $('inName').focus();
 });
