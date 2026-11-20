@@ -91,16 +91,17 @@ export function applyBrand(r, learned = []) {
   return r;
 }
 
-// applyBrand on a stored item, keeping its bookkeeping in step: the verified offer and the
-// automatic names belong to the same product, only relabelled, so they are not asked again
-// and keep their labels ("auto", "✓ bolti név"). keys: { offer(it), enrich(hu, de) }.
+// applyBrand on a stored item, keeping its bookkeeping in step: a verified offer (with a link)
+// and the automatic names belong to the same product, only relabelled, so they are not asked
+// again and keep their labels ("auto", "✓ bolti név"). An offer without a verified link is
+// searched again, now with the brand (Tomi 11097: Gaviscon). keys: { offer(it), enrich(hu, de) }.
 // Returns true when the item changed.
 export function moveBrand(it, learned, keys) {
   const before = { hu: it.hu || '', de: it.de || '', brand: it.brand || '' };
   const oKey = keys.offer(it), eKey = keys.enrich(it.hu, it.de);
   applyBrand(it, learned);
   if ((it.hu || '') === before.hu && (it.de || '') === before.de && (it.brand || '') === before.brand) return false;
-  if (it.offer && it.offer.key === oKey) it.offer.key = keys.offer(it);
+  if (it.offer?.link && it.offer.key === oKey) it.offer.key = keys.offer(it);
   const e = it.enrich;
   if (e?.autoVals) for (const f of ['hu', 'de']) if (before[f] && e.autoVals[f] === before[f] && it[f] !== before[f]) e.autoVals[f] = it[f];
   if (e && e.key === eKey) e.key = keys.enrich(it.hu, it.de);

@@ -83,10 +83,10 @@ export async function enrich(it, { online = navigator.onLine, aiName = null } = 
           try {
             const a = await aiName(from === 'hu' ? user.hu : '', from === 'de' ? user.de : '');
             const v = String(a?.[f] || '').trim();
-            if (v && norm(v) !== norm(user[from])) {
-              val = v.slice(0, 80); src = 'Claude (gép)';
-              if (a.brand && !it.brand) info.brand = { value: String(a.brand).slice(0, 40), estimate: true, source: 'Claude (gép)' };
-            }
+            // the brand Claude read from the name, also when the name stays the same in both
+            // languages ("Gaviscon dual"; Tomi 11097). The app uses it only if the name carries it.
+            if (a?.brand && !it.brand) info.brand = { value: String(a.brand).slice(0, 40), estimate: true, source: 'Claude (gép)' };
+            if (v && norm(v) !== norm(user[from])) { val = v.slice(0, 80); src = 'Claude (gép)'; }
           } catch { /* fall through to MyMemory */ }
         }
         // 1b. MyMemory

@@ -3,7 +3,7 @@
 // account. Online, items are enriched from free keyless sources (enrich.js);
 // offline that step silently waits and everything else works.
 import { enrich, enrichKey, lookupBarcode } from './enrich.js';
-import { applyBrand as splitInto, moveBrand, learnBrands } from './brand.js';
+import { applyBrand as splitInto, moveBrand, learnBrands, learnable } from './brand.js';
 import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, dataUrlToBlob, kvPut, kvGet } from './photos.js';
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
@@ -36,7 +36,7 @@ const safeUrl = (u) => (/^https:\/\//i.test(String(u || '')) ? String(u) : '');
 
 // ---- persistence --------------------------------------------------------------
 // bv.items is the v1 key and stays the same, so an update keeps the existing list.
-const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 4;
+const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 5;
 let items = {}, savedAt = 0;
 try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
 let storageOk = true, durableTimer = null;
@@ -70,7 +70,8 @@ const learned = () => learnBrands([items, hist]);
 const applyBrand = (r) => splitInto(r, learned());
 const BRAND_KEYS = { offer: offerKey, enrich: enrichKey };
 // a stored item: the same, keeping its verified offer and automatic-name labels
-const relabel = (it) => moveBrand(it, learned(), BRAND_KEYS);
+// extra: brands only this item's own sources name (the AI read it from the name: Tomi 11097)
+const relabel = (it, extra = []) => moveBrand(it, learned().concat(extra.map(learnable).filter(Boolean)), BRAND_KEYS);
 
 function uid() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -89,7 +90,8 @@ let hist = {};
 try { hist = JSON.parse(localStorage.getItem(LS_HISTORY) || '{}') || {}; } catch { hist = {}; }
 // Schema migration. v1 -> v2: brands are split out of names; v2 -> v3: again, with
 // the longer brand list (e.g. "Golden Toast"); v3 -> v4: with brands learned from the
-// verified shop pages and the tobacco brands ("Dohány paramount").
+// verified shop pages and the tobacco brands ("Dohány paramount"); v4 -> v5: pharmacy and
+// drugstore brands ("Gaviscon dual", Tomi 11097).
 // Items, ids and done states are never dropped. Runs after hist is loaded (learned brands).
 (function migrate() {
   let v = 1;
@@ -191,7 +193,7 @@ async function kickEnrich() {
       if (!now) continue; // deleted meanwhile
       if (now.hu !== before.hu || now.de !== before.de) continue; // edited meanwhile: run again on the new names
       if (!res) now.enrich = { key: enrichKey(now.hu, now.de), at: Date.now(), complete: true, autoVals: {}, sources: {} };
-      else { Object.assign(now, res.patch); relabel(now); } // an automatic name may carry a brand
+      else { Object.assign(now, res.patch); relabel(now, [now.enrich?.brand?.value]); } // the AI may have read a brand from the name
       persist(); render();
     }
   } finally { enriching = false; enrichCount = 0; setNet(); }

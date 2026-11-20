@@ -93,6 +93,11 @@ export const BRANDS = [
   // tobacco (Tomi 11092: "Dohány paramount")
   'Paramount', 'Marlboro', 'Camel', 'Lucky Strike', 'Pall Mall', 'Chesterfield', 'Winston', 'Gauloises', 'L&M', 'JPS',
   'Golden Virginia', 'Drum', 'Pueblo', 'American Spirit',
+  // pharmacy and drugstore (Tomi 11097: "Gaviscon dual")
+  'Gaviscon', 'Rennie', 'Talcid', 'Iberogast', 'Aspirin', 'Voltaren', 'Bepanthen', 'Wick', 'Grippostad', 'Nasic', 'Olynth',
+  'Dolormin', 'Thomapyrin', 'Buscopan', 'Imodium', 'Fenistil', 'Sinupret', 'Hansaplast', 'Doppelherz', 'Abtei', 'Tetesept',
+  'Kneipp', 'Eucerin', 'La Roche-Posay', 'Sebamed', 'Bübchen', 'Listerine', 'Odol', 'Parodontax', 'Sensodyne', 'Blend-a-med',
+  'Neutrogena', 'Garnier', "L'Oréal", 'Rexona', 'Axe', 'Always', 'Libresse', 'Durex', 'Kleenex', 'Cosmea',
 ];
 
 // Splitting a brand out of a name: site/brand.js (also uses brands learned from the shop pages).
