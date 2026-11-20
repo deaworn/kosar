@@ -577,13 +577,14 @@ export function matchCachedEntry(db, text, { now = Date.now(), ttl = 3 * 864e5, 
   // Alias / fuzzy dictionary fallback on cached entries (e.g. "Kecsap" or "ketchap" -> cached "ketchup")
   if (_fallback) {
     const dictHit = resolveDictEntry(clean);
-    if (dictHit) {
-      const canonHu = fold(dictHit[0]), canonDe = fold(dictHit[1]);
-      for (const qCanon of [canonHu, canonDe].filter(Boolean)) {
-        if (asciiFold(qCanon) === aq) continue;
-        const canonRes = matchCachedEntry(db, qCanon, { now, ttl, max, learned, _fallback: false });
-        if (canonRes) return canonRes;
-      }
+    const aliasMatches = Object.entries(ALIASES)
+      .filter(([alias]) => asciiFold(alias).startsWith(aq))
+      .sort(([a], [b]) => a.length - b.length || a.localeCompare(b, 'hu'));
+    const canonical = new Set([dictHit?.[0], dictHit?.[1], ...aliasMatches.map(([, target]) => target)]);
+    for (const name of canonical) {
+      if (!name || asciiFold(name) === aq) continue;
+      const canonRes = matchCachedEntry(db, name, { now, ttl, max, learned, _fallback: false });
+      if (canonRes) return canonRes;
     }
   }
   return null;
