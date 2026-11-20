@@ -14,7 +14,7 @@ import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
-import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, pickCandidate, sortCandidates } from './candidates.js';
+import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, pickCandidate, sortCandidates } from './candidates.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -377,6 +377,8 @@ function renderSuggest() {
   const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
   if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
+  const tips = dictionaryTips(q);
+  const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
   const hits = Object.entries(hist).filter(([, h]) => ((h.hu || '') + ' ' + (h.de || '') + ' ' + (h.brand || '')).toLowerCase().includes(q))
     .sort((a, b) => (b[1].deletedAt || 0) - (a[1].deletedAt || 0)).slice(0, 4);
   const histHtml = hits.map(([id, h]) => '<button type="button" class="sug" data-id="' + esc(id) + '"><b>' + esc(h.hu || h.de) + '</b><span>' + esc([h.de && h.hu ? h.de : '', h.brand].filter(Boolean).join(' · ')) + '</span><i>korábbi</i></button>').join('');
@@ -396,8 +398,8 @@ function renderSuggest() {
       '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
   }).join('');
   const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
-  box.innerHTML = histHtml + headHtml + candHtml + pendHtml;
-  box.hidden = !hits.length && !cands.length && !pending;
+  box.innerHTML = tipHtml + histHtml + headHtml + candHtml + pendHtml;
+  box.hidden = !tips.length && !hits.length && !cands.length && !pending;
 }
 function suggest() {
   typingCands.input($('inName').value);
@@ -405,6 +407,19 @@ function suggest() {
 }
 $('inName').addEventListener('input', suggest);
 $('suggest').addEventListener('click', (ev) => {
+  const tip = ev.target.closest('button[data-tip]');
+  if (tip) {
+    const row = dictionaryTips($('inName').value)[Number(tip.dataset.tip)];
+    if (!row) return;
+    const [hu, de, icon, cat] = row;
+    const id = uid();
+    edit(id, { hu, de, icon, cat, qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
+    $('inName').value = '';
+    typingCands.clear();
+    reveal(id);
+    $('inName').focus();
+    return;
+  }
   const cbtn = ev.target.closest('button[data-cand]');
   if (cbtn) {
     const st = typingCands.getState();

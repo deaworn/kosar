@@ -4,7 +4,7 @@
 // One tap on the phone picks a candidate: the item gets that product's name, brand, price, store,
 // link and image. Until picked, the item works as a plain list entry.
 // Pure: shared by the phone (site/app.js), the helper (ai/offers.mjs), and Node tests.
-import { DICT, ALIASES, lookup, resolveAlias } from './dictionary.js';
+import { DICT, ALIASES, TIP_DICT, TIP_ALIASES, lookup, resolveAlias } from './dictionary.js';
 import { applyBrand, splitBrand, learnable } from './brand.js';
 import { guessLang } from './lang.js';
 import { shopName } from './name-check.js';
@@ -64,6 +64,31 @@ export function editDistance(a, b) {
     prev = curr;
   }
   return prev[n];
+}
+
+const TIP_NAMES = new Map(TIP_DICT.map(entry => [entry[0], new Set([cleanAscii(entry[0]), cleanAscii(entry[1])])]));
+for (const [alias, target] of Object.entries(TIP_ALIASES)) TIP_NAMES.get(target)?.add(cleanAscii(alias));
+
+export function dictionaryTips(text) {
+  const query = cleanAscii(text);
+  if (query.length < 2) return [];
+  const tolerance = query.length >= 6 ? 2 : query.length >= 3 ? 1 : 0;
+  const ranked = [];
+  for (const entry of TIP_DICT) {
+    let score = Infinity;
+    for (const name of TIP_NAMES.get(entry[0])) {
+      if (name === query) score = 0;
+      else if (name.startsWith(query)) score = Math.min(score, 1 + name.length / 1000);
+      else if (tolerance && Math.abs(name.length - query.length) <= tolerance + 4) {
+        for (let len = Math.max(2, query.length - tolerance); len <= Math.min(name.length, query.length + tolerance); len++) {
+          const distance = editDistance(query, name.slice(0, len));
+          if (distance <= tolerance) score = Math.min(score, 2 + distance + Math.abs(len - query.length) / 10);
+        }
+      }
+    }
+    if (Number.isFinite(score)) ranked.push({ entry, score });
+  }
+  return ranked.sort((a, b) => a.score - b.score).slice(0, 3).map(({ entry }) => entry);
 }
 
 const KNOWN_ASCII_WORDS = (() => {
