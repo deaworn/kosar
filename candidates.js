@@ -66,34 +66,63 @@ export function editDistance(a, b) {
   return prev[n];
 }
 
-const TIP_NAMES = new Map(TIP_DICT.map(entry => [entry[0], new Set([cleanAscii(entry[0]), cleanAscii(entry[1])])]));
-for (const [alias, target] of Object.entries(TIP_ALIASES)) TIP_NAMES.get(target)?.add(cleanAscii(alias));
+const TIP_NAMES = new Map(TIP_DICT.map(([hu, de]) => [hu, {
+  hu: cleanAscii(hu), de: cleanAscii(de), aliases: new Set(),
+}]));
+for (const [alias, target] of Object.entries(TIP_ALIASES)) TIP_NAMES.get(target)?.aliases.add(cleanAscii(alias));
 
 const TIP_INDEX_BY_COUNTRY = new Map(['de', 'at', 'hu'].map(country => [country, new Map(
   [...TIP_NAMES].map(([name, terms]) => [country + '|' + name, terms]))]));
 
-export function dictionaryTips(text, country = 'de') {
+export function dictionaryTips(text, country = 'de', { allowFuzzy = true } = {}) {
   const query = cleanAscii(text);
-  if (query.length < 2) return [];
-  const tolerance = query.length >= 6 ? 2 : query.length >= 3 ? 1 : 0;
-  const ranked = [];
   const index = TIP_INDEX_BY_COUNTRY.get(country);
-  if (!index) return [];
+  if (query.length < 2 || !index) return [];
+
+  const prefixes = [];
   for (const entry of TIP_DICT) {
+    const { hu, aliases, de } = index.get(country + '|' + entry[0]);
+    for (const [priority, names] of [[0, [hu]], [1, aliases], [2, [de]]]) {
+      const length = Math.min(...Array.from(names, name => name.startsWith(query) ? name.length : Infinity));
+      if (!Number.isFinite(length)) continue;
+      prefixes.push({ entry, priority, length });
+      break;
+    }
+  }
+  if (prefixes.length) {
+    return prefixes.sort((a, b) => a.priority - b.priority || a.length - b.length)
+      .slice(0, 3).map(({ entry }) => entry);
+  }
+
+  const letters = letterCount(query);
+  if (!allowFuzzy || letters < 5) return [];
+  const tolerance = letters >= 6 ? 2 : 1;
+  const fuzzy = [];
+  for (const entry of TIP_DICT) {
+    const { hu, aliases, de } = index.get(country + '|' + entry[0]);
     let score = Infinity;
-    for (const name of index.get(country + '|' + entry[0])) {
-      if (name === query) score = 0;
-      else if (name.startsWith(query)) score = Math.min(score, 1 + name.length / 1000);
-      else if (tolerance && Math.abs(name.length - query.length) <= tolerance + 4) {
-        for (let len = Math.max(2, query.length - tolerance); len <= Math.min(name.length, query.length + tolerance); len++) {
-          const distance = editDistance(query, name.slice(0, len));
-          if (distance <= tolerance) score = Math.min(score, 2 + distance + Math.abs(len - query.length) / 10);
-        }
+    for (const name of [hu, ...aliases, de]) {
+      if (Math.abs(name.length - query.length) > tolerance + 4) continue;
+      for (let len = query.length - tolerance; len <= Math.min(name.length, query.length + tolerance); len++) {
+        const distance = editDistance(query, name.slice(0, len));
+        if (distance <= tolerance) score = Math.min(score, distance + Math.abs(len - query.length) / 10);
       }
     }
-    if (Number.isFinite(score)) ranked.push({ entry, score });
+    if (Number.isFinite(score)) fuzzy.push({ entry, score });
   }
-  return ranked.sort((a, b) => a.score - b.score).slice(0, 3).map(({ entry }) => entry);
+  return fuzzy.sort((a, b) => a.score - b.score).slice(0, 3).map(({ entry }) => entry);
+}
+
+export function ownItemTips(text, items, history) {
+  const query = cleanAscii(text);
+  if (query.length < 2) return [];
+  const rows = [
+    ...Object.entries(items).map(([id, item]) => ({ id, item, inList: true })),
+    ...Object.entries(history).map(([id, item]) => ({ id, item, inList: false })),
+  ];
+  return rows.filter(({ item }) => [item.hu, item.de, item.brand].some(value => cleanAscii(value).startsWith(query)))
+    .sort((a, b) => (b.item.deletedAt || b.item.order || 0) - (a.item.deletedAt || a.item.order || 0))
+    .slice(0, 4);
 }
 
 const KNOWN_ASCII_WORDS = (() => {
@@ -356,6 +385,7 @@ export function toCandidate(v, learned = []) {
     date,
     ...(online ? { online: true } : {}),
     ...((p?.inArea ?? v.inArea) === false ? { inArea: false } : {}),
+    ...((p?.onlineAvailable ?? v.onlineAvailable) === false ? { onlineAvailable: false } : {}),
     ...(currency ? { currency } : {}),
   };
 }
@@ -472,6 +502,7 @@ export function pickCandidate(it, cand, learned = [], keys = null) {
       url: c.url || '',
       ...(c.online ? { online: true } : {}),
       ...(c.inArea === false ? { inArea: false } : {}),
+      ...(c.onlineAvailable === false ? { onlineAvailable: false } : {}),
       ...(c.currency ? { currency: c.currency } : {}),
     },
   };

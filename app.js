@@ -15,7 +15,7 @@ import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
-import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, pickCandidate, sortCandidates } from './candidates.js';
+import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, ownItemTips, pickCandidate, sortCandidates } from './candidates.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -237,7 +237,11 @@ const eur = (value) => COUNTRIES[shoppingPlace.country].currency === 'HUF'
 // "Aldi Süd 1,29 € / 200 g (11-18)": store, price, unit and the day it was read from the shop page.
 // a shop price always says its unit, or that the shop did not show one (Tomi 11003); own prices keep theirs
 // an online shop's price says so (shipping not added; Tomi 11104)
-function priceText(p, own = false) { return (p.store ? p.store + (p.online ? ' (online)' : '') + ' ' : '') + eur(p.value) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (!own && p.inArea === false ? ' \u00b7 K\u00f6rzet n\u00e9lk\u00fcl' : '') + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
+function shopScope(p) {
+  return (p.inArea === false ? ' \u00b7 K\u00f6rzet n\u00e9lk\u00fcl' : '')
+    + (p.onlineAvailable === false ? ' \u00b7 Online nincs k\u00e9szleten' : '');
+}
+function priceText(p, own = false) { return (p.store ? p.store + (p.online ? ' (online)' : '') + ' ' : '') + eur(p.value) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (own ? '' : shopScope(p)) + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
 // the cheapest online pharmacy next to the main price, when it is another page (round 11)
 const pharmacyNote = (of) => of?.pharmacy && of.price && of.pharmacy.url !== of.price.url ? of.pharmacy : null;
 function metaHtml(it) {
@@ -273,7 +277,7 @@ function chooserHtml(it) {
   if (!cs.length) return '';
   return '<div class="chooser" role="group" aria-label="Termékválasztó">' + cs.map((c, i) => {
     const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
-    const st = c.store + (c.online ? ' (online)' : '');
+    const st = c.store + (c.online ? ' (online)' : '') + shopScope(c);
     const sub = candidateUnitInfo(c);
     return '<button type="button" class="cand" data-act="pick" data-i="' + i + '">' + img +
       '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(st) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
@@ -387,11 +391,17 @@ function renderSuggest() {
   const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
   if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
-  const tips = dictionaryTips(q, shoppingPlace.country);
+  const hits = ownItemTips(q, items, hist);
+  const tips = dictionaryTips(q, shoppingPlace.country, { allowFuzzy: !hits.length });
   const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
-  const hits = Object.entries(hist).filter(([, h]) => ((h.hu || '') + ' ' + (h.de || '') + ' ' + (h.brand || '')).toLowerCase().includes(q))
-    .sort((a, b) => (b[1].deletedAt || 0) - (a[1].deletedAt || 0)).slice(0, 4);
-  const histHtml = hits.map(([id, h]) => '<button type="button" class="sug" data-id="' + esc(id) + '"><b>' + esc(h.hu || h.de) + '</b><span>' + esc([h.de && h.hu ? h.de : '', h.brand].filter(Boolean).join(' · ')) + '</span><i>korábbi</i></button>').join('');
+  const histHtml = hits.map(({ id, item: h, inList }) => {
+    const variant = chosenVariant(h)?.name;
+    const label = inList && !h.done ? 'A list\u00e1n' : 'Kor\u00e1bbi';
+    return '<button type="button" class="sug" data-own-id="' + esc(id) + '" data-in-list="' + inList + '">'
+      + '<b>' + esc(h.hu || h.de) + '</b><span>'
+      + esc([h.de && h.hu ? h.de : '', h.brand, variant && shortName(variant, h.brand)].filter(Boolean).join(' \u00b7 '))
+      + '</span><i>' + label + '</i></button>';
+  }).join('');
   const st = typingCands.getState();
   const match = q.length >= 3 && st.text.toLowerCase() === q;
   const cands = match ? st.candidates : [];
@@ -400,7 +410,7 @@ function renderSuggest() {
   const headHtml = matched ? '<div class="shead">' + esc(matched) + ':</div>' : '';
   const candHtml = cands.map((c, i) => {
     const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
-    const store = c.store + (c.online ? ' (online)' : '') + (c.inArea === false ? ' \u00b7 K\u00f6rzet n\u00e9lk\u00fcl' : '');
+    const store = c.store + (c.online ? ' (online)' : '') + shopScope(c);
     const sub = candidateUnitInfo(c);
     return '<button type="button" class="cand" data-cand="' + i + '">' + img +
       '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(store) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
@@ -408,7 +418,7 @@ function renderSuggest() {
       '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
   }).join('');
   const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
-  box.innerHTML = tipHtml + histHtml + headHtml + candHtml + pendHtml;
+  box.innerHTML = histHtml + tipHtml + headHtml + candHtml + pendHtml;
   box.hidden = !tips.length && !hits.length && !cands.length && !pending;
 }
 function suggest() {
@@ -419,7 +429,10 @@ $('inName').addEventListener('input', suggest);
 $('suggest').addEventListener('click', (ev) => {
   const tip = ev.target.closest('button[data-tip]');
   if (tip) {
-    const row = dictionaryTips($('inName').value, shoppingPlace.country)[Number(tip.dataset.tip)];
+    const query = $('inName').value;
+    const row = dictionaryTips(query, shoppingPlace.country, {
+      allowFuzzy: !ownItemTips(query, items, hist).length,
+    })[Number(tip.dataset.tip)];
     if (!row) return;
     const [hu, de, icon, cat] = row;
     const id = uid();
@@ -444,8 +457,19 @@ $('suggest').addEventListener('click', (ev) => {
     $('inName').focus();
     return;
   }
-  const b = ev.target.closest('button.sug'); if (!b) return;
-  restore(b.dataset.id); $('inName').value = ''; typingCands.clear();
+  const own = ev.target.closest('button[data-own-id]');
+  if (!own) return;
+  const id = own.dataset.ownId;
+  if (own.dataset.inList === 'true') {
+    const item = items[id];
+    if (!item) return;
+    if (item.done) edit(id, { done: false, order: Date.now() });
+    reveal(id);
+  } else {
+    restore(id);
+  }
+  $('inName').value = '';
+  typingCands.clear();
 });
 function openHistory() {
   if ($('menu').open) $('menu').close();
@@ -501,7 +525,7 @@ function openEditor(id, d = null) {
   if (id && it.alts?.length) lines.push('Más javaslat: ' + it.alts.map((c, i) => '<button type="button" class="ghost take alt" data-i="' + i + '">' + esc(c.hu || c.de) + (c.brand ? ' · ' + esc(c.brand) : '') + '</button>').join(' '));
   const of = id ? it.offer : null;
   const edCands = of?.candidates?.length ? sortCandidates(of.candidates) : [];
-  if (edCands.length) lines.push('Bolti ajánlatok (egységár szerint): ' + edCands.map((c, i) => '<button type="button" class="ghost take candpick" data-i="' + i + '">' + esc(c.store + ': ' + candidateTitle(c) + ' · ' + eur(c.price) + (c.unitPriceText ? ' (' + c.unitPriceText + ')' : '')) + '</button>').join(' '));
+  if (edCands.length) lines.push('Bolti ajánlatok (egységár szerint): ' + edCands.map((c, i) => '<button type="button" class="ghost take candpick" data-i="' + i + '">' + esc(c.store + shopScope(c) + ': ' + candidateTitle(c) + ' · ' + eur(c.price) + (c.unitPriceText ? ' (' + c.unitPriceText + ')' : '')) + '</button>').join(' '));
   if (of?.price) lines.push('Ár: <b>' + esc(priceText(of.price)) + '</b>' + (of.price.base ? ' · ' + esc(of.price.base) : '') + ' <span class="note">(a bolti oldalról, ' + esc(of.price.date) + ')</span>');
   else if (of) lines.push('Ár: nem találtam <span class="note">(ellenőrizve ' + esc(String(of.checked || '').slice(0, 10)) + ')</span>');
   for (const st of of?.notSold || []) lines.push(esc(st) + ': <span class="est">online nem mutat árat</span> <span class="note">(a boltban lehet, hogy kapható)</span>');
