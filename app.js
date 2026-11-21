@@ -387,6 +387,21 @@ const typingCands = createTypingCandidates({
   minChars: 3,
   maxRows: 6,
 });
+let huCatalog = [];
+let huCatalogLoad;
+async function loadHuCatalog() {
+  if (huCatalogLoad) return huCatalogLoad;
+  huCatalogLoad = (async () => {
+    const { indexHuCatalog, searchHuCatalog } = await import('./off-hu-search.js');
+    const response = await fetch(new URL('./off-hu-catalog.json', import.meta.url));
+    if (!response.ok) throw new Error('Product catalog unavailable');
+    huCatalog = indexHuCatalog(await response.json());
+    lookupHuCatalog = searchHuCatalog;
+    renderSuggest();
+  })().catch(() => { huCatalogLoad = null; });
+  return huCatalogLoad;
+}
+let lookupHuCatalog = () => [];
 function renderSuggest() {
   const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
@@ -418,15 +433,33 @@ function renderSuggest() {
       '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
   }).join('');
   const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
-  box.innerHTML = histHtml + tipHtml + headHtml + candHtml + pendHtml;
-  box.hidden = !tips.length && !hits.length && !cands.length && !pending;
+  const catalogHits = lookupHuCatalog(huCatalog, q, shoppingPlace.country);
+  const catalogHtml = catalogHits.map(({ gtin, name, brand, quantity }) =>
+    '<button type="button" class="sug" data-off-gtin="' + esc(gtin) + '"><b>' + esc(name) + '</b><span>'
+    + esc([brand, quantity].filter(Boolean).join(' · ')) + '</span><i>Open Food Facts</i></button>').join('');
+  box.innerHTML = histHtml + tipHtml + catalogHtml + headHtml + candHtml + pendHtml;
+  box.hidden = !tips.length && !hits.length && !catalogHits.length && !cands.length && !pending;
 }
 function suggest() {
+  if (shoppingPlace.country === 'hu' && $('inName').value.trim().length >= 3) void loadHuCatalog();
   typingCands.input($('inName').value);
   renderSuggest();
 }
 $('inName').addEventListener('input', suggest);
 $('suggest').addEventListener('click', (ev) => {
+  const product = ev.target.closest('button[data-off-gtin]');
+  if (product) {
+    const row = lookupHuCatalog(huCatalog, $('inName').value, shoppingPlace.country)
+      .find(({ gtin }) => gtin === product.dataset.offGtin);
+    if (!row) return;
+    const id = uid();
+    edit(id, { hu: row.name, de: '', brand: row.brand, barcode: row.gtin, qty: '', group: 'kell', done: false, order: Date.now() });
+    $('inName').value = '';
+    typingCands.clear();
+    reveal(id);
+    $('inName').focus();
+    return;
+  }
   const tip = ev.target.closest('button[data-tip]');
   if (tip) {
     const query = $('inName').value;
