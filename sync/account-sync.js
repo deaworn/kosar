@@ -7,6 +7,7 @@
 import { isValidShareId } from './provider.js';
 import { compareVersion, mergeSharedState, normalizeSharedItem, normalizeTombstone } from './merge.js';
 import { loadFirebaseSdk } from './firebase-provider.js';
+import { normalizeListPlace } from '../lists.js';
 
 const DEFAULT_LIST_NAME = 'Bevásárlás';
 const VALID_REPEATS = new Set(['none', 'daily', 'weekly']);
@@ -52,6 +53,10 @@ export function normalizeAccountListMeta(raw, fallback = {}) {
   if (typeof src.color === 'string' && /^[a-z0-9_-]{1,20}$/.test(src.color.trim())) {
     out.color = src.color.trim();
   }
+  const place = normalizeListPlace(src.place);
+  if (place) {
+    out.place = place;
+  }
   if (shareId) {
     out.shareId = shareId;
   }
@@ -81,6 +86,10 @@ function listMetaToFirestoreDoc(meta) {
   };
   if (typeof meta.color === 'string' && meta.color.trim()) {
     doc.color = meta.color.trim().slice(0, 20);
+  }
+  const place = normalizeListPlace(meta.place);
+  if (place) {
+    doc.place = place;
   }
   if (meta.updatedBy) doc.updatedBy = String(meta.updatedBy).slice(0, 64);
   if (meta.deleted) doc.deleted = true;
@@ -259,6 +268,7 @@ export function mergeAccountState({
         weekday: localL?.weekday ?? rMeta.weekday ?? 1,
         lastReset: localL?.lastReset || 0,
         color: localL?.color ?? rMeta.color ?? null,
+        place: localL?.place ?? rMeta.place ?? null,
         shareId: rMeta.shareId,
         createdAt: rMeta.createdAt,
         updatedAt: rMeta.updatedAt,
@@ -282,6 +292,7 @@ export function mergeAccountState({
       weekday: winMeta.weekday,
       lastReset: localL?.lastReset || 0,
       color: winMeta.color || null,
+      place: winMeta.place || null,
       createdAt: winMeta.createdAt,
       updatedAt: winMeta.updatedAt,
       updatedBy: winMeta.updatedBy || '',

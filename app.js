@@ -16,7 +16,7 @@ import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
 import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, ownItemTips, pickCandidate, sortCandidates } from './candidates.js';
-import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, migrateToLists, applyListResets, addIncomingList, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
+import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, normalizeListPlace, resolveListPlace, migrateToLists, applyListResets, addIncomingList, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
 import { DEFAULT_MODE, DEFAULT_ACCENT, getAccent, isAccentAvailable, resolveAccentId, accentsForMode, accentCssVars, accentSwatchStyle } from './accents.js';
 import { FIREBASE_CONFIG } from './sync/config.js';
 import { createFirebaseProvider } from './sync/firebase-provider.js';
@@ -56,6 +56,10 @@ const LS_PLACE = 'bv.shoppingPlace';
 let settings = null;
 try { const raw = localStorage.getItem(LS_PLACE); if (raw) settings = normalizePlace(JSON.parse(raw)); } catch { /* default */ }
 let shoppingPlace = settings || DEFAULT_PLACE;
+const listById = (id) => lists.find((x) => x.id === id) || lists[0] || null;
+const listPlace = (list) => resolveListPlace(list, shoppingPlace);
+const itemPlace = (it) => listPlace(listById(it?.list));
+const activeAddPlace = () => listPlace(listById(getActiveAddListId()));
 const LS_ITEMS = 'bv.items', LS_LISTS = 'bv.lists', LS_ACTIVE_LIST = 'bv.activeList', LS_SCHEMA = 'bv.schema', SCHEMA = 6;
 let items = {}, lists = [], activeListId = DEFAULT_LIST_ID, savedAt = 0;
 try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
@@ -262,7 +266,9 @@ function toggleList(id) {
 
 function edit(id, patch) {
   const prevListId = items[id]?.list;
-  const it = items[id] || (items[id] = { id, list: patch.list || targetListForAdd(), offerPlace: placeKey(shoppingPlace) });
+  const targetLid = patch.list || prevListId || targetListForAdd();
+  const lp = listPlace(listById(targetLid));
+  const it = items[id] || (items[id] = { id, list: targetLid, ...(lp !== 'none' ? { offerPlace: placeKey(lp) } : {}) });
   Object.assign(it, patch);
   if (prevListId && patch.list && prevListId !== patch.list) {
     queueDeleteSync(prevListId, id);
@@ -419,10 +425,11 @@ function iconHtml(it) {
 }
 
 const forint = new Intl.NumberFormat('hu-HU', { maximumFractionDigits: 0 });
-const eur = (value) => COUNTRIES[shoppingPlace.country].currency === 'HUF'
+const eur = (value, loc = shoppingPlace) => (loc && loc !== 'none' && COUNTRIES[loc.country]?.currency === 'HUF')
   ? forint.format(value) + ' Ft'
   : Number(value).toFixed(2).replace('.', ',') + ' €';
 function itemPrice(it) {
+  if (itemPlace(it) === 'none') return null;
   if (it?.myPrice && Number.isFinite(Number(it.myPrice.value)) && Number(it.myPrice.value) > 0) {
     return Number(it.myPrice.value);
   }
@@ -443,10 +450,15 @@ function shopScope(p) {
   return (p.inArea === false ? ' \u00b7 K\u00f6rzet n\u00e9lk\u00fcl' : '')
     + (p.onlineAvailable === false ? ' \u00b7 Online nincs k\u00e9szleten' : '');
 }
-function priceText(p, own = false) { return (p.store ? p.store + (p.online ? ' (online)' : '') + ' ' : '') + eur(p.value) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (own ? '' : shopScope(p)) + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
+function priceText(p, own = false, loc = shoppingPlace) { return (p.store ? p.store + (p.online ? ' (online)' : '') + ' ' : '') + eur(p.value, loc) + (own ? (p.unit ? ' / ' + p.unit : '') : unitText(p.unit)) + (own ? '' : shopScope(p)) + (p.date ? ' (' + String(p.date).slice(5) + ')' : ''); }
 // the cheapest online pharmacy next to the main price, when it is another page (round 11)
 const pharmacyNote = (of) => of?.pharmacy && of.price && of.pharmacy.url !== of.price.url ? of.pharmacy : null;
 function metaHtml(it) {
+  const lp = itemPlace(it);
+  if (lp === 'none') {
+    const brand = it.brand || '';
+    return brand ? '<div class="meta">' + esc(brand) + '</div>' : '';
+  }
   const cs = activeCandidates(it);
   if (cs.length) return '<div class="meta"><span class="note">' + cs.length + ' ajánlat egységár szerint – koppints a választáshoz:</span></div>';
   const parts = [];
@@ -455,19 +467,19 @@ function metaHtml(it) {
   if (brand) parts.push(esc(brand));
   // a pack size in use (Tomi's pick or his usual band) is the price; the number of sizes is a hint to pick
   const pv = !it.myPrice && chosenVariant(it), nv = it.offer?.variants?.length || 0;
-  if (it.myPrice) parts.push('<span class="price">' + esc(priceText(it.myPrice, true)) + '</span> <span class="tag">saját</span>');
-  else if (pv) parts.push('<span class="price">' + esc(shortName(pv.name, it.brand) + ': ' + priceText(pv)) + '</span>');
+  if (it.myPrice) parts.push('<span class="price">' + esc(priceText(it.myPrice, true, lp)) + '</span> <span class="tag">saját</span>');
+  else if (pv) parts.push('<span class="price">' + esc(shortName(pv.name, it.brand) + ': ' + priceText(pv, false, lp)) + '</span>');
   else if (it.offer?.price) {
-    parts.push('<span class="price">' + esc(priceText(it.offer.price)) + '</span>');
+    parts.push('<span class="price">' + esc(priceText(it.offer.price, false, lp)) + '</span>');
     if (it.offer.picked && it.offer.price.base) parts.push('<span class="note">' + esc(it.offer.price.base) + '</span>');
   }
   else if (it.offer?.locationUnavailable) parts.push('<span class="noprice">Ehhez a helyhez m\u00e9g nincs ellen\u0151rz\u00f6tt \u00e1rforr\u00e1s.</span>');
   else if (it.offer) parts.push('<span class="noprice">ár: nem találtam</span>');
   // Tomi's REWE price stays the main one; a cheaper verified shop is a note next to it
-  if (!it.myPrice && it.offer?.price && it.offer?.alt) parts.push('<span class="note">olcsóbb: ' + esc(it.offer.alt.store + ' ' + eur(it.offer.alt.value)) + '</span>');
+  if (!it.myPrice && it.offer?.price && it.offer?.alt) parts.push('<span class="note">olcsóbb: ' + esc(it.offer.alt.store + ' ' + eur(it.offer.alt.value, lp)) + '</span>');
   if (!it.myPrice && nv > 1) parts.push('<span class="note">' + nv + ' kiszerelés, koppints a választáshoz</span>');
   const ph = !it.myPrice && pharmacyNote(it.offer);
-  if (ph) parts.push('<span class="note">' + (ph.value < it.offer.price.value ? 'olcsóbb online patika: ' : 'online patika: ') + esc(priceText(ph)) + '</span>');
+  if (ph) parts.push('<span class="note">' + (ph.value < it.offer.price.value ? 'olcsóbb online patika: ' : 'online patika: ') + esc(priceText(ph, false, lp)) + '</span>');
   // Tomi's REWE has no online price for it (the shop itself may still sell it: Tomi 11009): a note next
   // to another shop's price; with no price anywhere the row keeps "ár: nem találtam"
   if (it.offer?.price) for (const st of it.offer?.notSold || []) parts.push('<span class="note">' + esc(st) + ' online nem mutat árat</span>');
@@ -475,6 +487,8 @@ function metaHtml(it) {
 }
 
 function chooserHtml(it) {
+  const lp = itemPlace(it);
+  if (lp === 'none') return '';
   const cs = activeCandidates(it);
   if (!cs.length) return '';
   return '<div class="chooser" role="group" aria-label="Termékválasztó">' + cs.map((c, i) => {
@@ -484,16 +498,17 @@ function chooserHtml(it) {
     return '<button type="button" class="cand" data-act="pick" data-i="' + i + '">' + img +
       '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(st) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
       (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
-      '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
+      '<span class="cprice">' + esc(eur(c.price, lp)) + '</span></button>';
   }).join('') + '</div>';
 }
 
 function rowHtml(it) {
+  const lp = itemPlace(it);
   const av = it.enrich?.autoVals || {};
   // Dictionary translations are reliable ("auto"); machine translations are a guess ("tipp?").
   const dict = it.enrich?.sources?.translation === 'szótár';
   // an auto-filled German name is checked against the verified shop product (Tomi 10990/10993)
-  const nc = it.de && av.de === it.de && !activeCandidates(it).length ? nameCheck(it.de, it.offer) : { state: 'unchecked' };
+  const nc = lp !== 'none' && it.de && av.de === it.de && !activeCandidates(it).length ? nameCheck(it.de, it.offer) : { state: 'unchecked' };
   const autoTag = (f) => {
     if (!(it[f] && av[f] === it[f])) return '';
     if (f === 'de' && nc.state === 'ok') return '<span class="tag">✓ bolti név</span>';
@@ -553,7 +568,10 @@ function reveal(id) {
 }
 
 function render() {
-  for (const item of Object.values(items)) useItemPlace(item, shoppingPlace);
+  for (const item of Object.values(items)) {
+    const lp = itemPlace(item);
+    if (lp !== 'none') useItemPlace(item, lp);
+  }
   ensureActiveList();
   if (lists.length === 1 && lists[0].collapsed) lists[0].collapsed = false;
   const all = visible();
@@ -579,9 +597,10 @@ function render() {
     const lItems = all.filter((i) => (i.list || fallbackId) === l.id);
     const lTotal = lItems.length, lDone = lItems.filter((i) => i.done).length;
     const pct = lTotal ? Math.round((lDone / lTotal) * 100) : 0;
-    const est = listEstimate(lItems, itemPrice);
-    const estHtml = est.pricedCount > 0
-      ? '<span class="lest' + (est.allDone ? ' done' : '') + '">~' + esc(eur(est.total)) +
+    const lp = listPlace(l);
+    const est = lp === 'none' ? { total: 0, pricedCount: 0, missingCount: 0, allDone: false } : listEstimate(lItems, itemPrice);
+    const estHtml = lp !== 'none' && est.pricedCount > 0
+      ? '<span class="lest' + (est.allDone ? ' done' : '') + '">~' + esc(eur(est.total, lp)) +
         (est.missingCount > 0 ? '<span class="lest-miss"> · ' + est.missingCount + ' tétel ár nélkül</span>' : '') +
         '</span>'
       : '';
@@ -860,7 +879,9 @@ const BRAND_CHIP_LIMIT = 12;
 const BRAND_SEARCH_LIMIT = 30;
 
 function getBrandSheetGroups(it) {
-  if (shoppingPlace.country === 'hu') {
+  const lp = itemPlace(it);
+  if (lp === 'none') return [];
+  if (lp.country === 'hu') {
     const products = matchCatalogProducts(huCatalog, it.hu || it.de || '', WORD_EXCLUSIONS);
     return groupProductsByBrand(products);
   }
@@ -883,13 +904,29 @@ function applyBrandSheetPick(it, pick) {
 function renderBrandSheet() {
   const it = brandSheetId ? items[brandSheetId] : null;
   if (!it) return;
-  $('bsTitle').textContent = (it.hu || it.de || 'Tétel') + ' – márka és típus';
+  const lp = itemPlace(it);
+  const isNone = lp === 'none';
+  $('bsTitle').textContent = (it.hu || it.de || 'Tétel') + (isNone ? ' – típus / megjegyzés' : ' – márka és típus');
+  const searchWrap = $('bsSearch').closest('.bs-search-wrap');
+  if (searchWrap) searchWrap.hidden = isNone;
+  if (isNone) {
+    brandSheetSearchResults = [];
+    $('bsSearchResults').hidden = true;
+    $('bsSearchHint').hidden = true;
+    $('bsTwoStep').hidden = false;
+    $('bsBrands').closest('.bs-sec').hidden = true;
+    $('bsTypeSec').hidden = true;
+    $('bsCustomForm').hidden = false;
+    $('bsCustomInput').value = it.type || '';
+    return;
+  }
+  $('bsBrands').closest('.bs-sec').hidden = false;
 
   const query = $('bsSearch').value.trim();
   if (query) {
     $('bsTwoStep').hidden = true;
     $('bsSearchResults').hidden = false;
-    const pool = shoppingPlace.country === 'hu'
+    const pool = lp.country === 'hu'
       ? huCatalog
       : candidatesToProducts(it, activeCandidates(it));
     const matches = searchBrandSheetCatalog(pool, query, { limit: BRAND_SEARCH_LIMIT + 1 });
@@ -897,7 +934,7 @@ function renderBrandSheet() {
     brandSheetSearchResults = hasMore ? matches.slice(0, BRAND_SEARCH_LIMIT) : matches;
     $('bsSearchHint').hidden = !hasMore;
     if (!brandSheetSearchResults.length) {
-      const msg = shoppingPlace.country === 'hu' && !huCatalog.length
+      const msg = lp.country === 'hu' && !huCatalog.length
         ? 'Katalógus betöltése…'
         : 'Nincs találat';
       $('bsResults').innerHTML = '<div class="bs-empty">' + msg + '</div>';
@@ -961,7 +998,8 @@ function openBrandSheet(id) {
   clearTimeout(brandSheetSearchTimer);
   brandSheetSearchResults = [];
   $('bsSearch').value = '';
-  if (shoppingPlace.country === 'hu' && !huCatalog.length) {
+  const lp = itemPlace(it);
+  if (lp !== 'none' && lp.country === 'hu' && !huCatalog.length) {
     void loadHuCatalog().then(() => {
       if ($('brandSheet').open && brandSheetId === id) renderBrandSheet();
     });
@@ -1065,7 +1103,10 @@ window.addEventListener('popstate', () => {
 // Typing suggests earlier (deleted) items and product candidates from the cache;
 // one tap brings back a deleted item or adds the item with the picked product.
 const typingCands = createTypingCandidates({
-  fetchCandidates: (text, opts) => ai.candidates(text, { ...opts, location: shoppingPlace }),
+  fetchCandidates: (text, opts) => {
+    const lp = activeAddPlace();
+    return lp === 'none' ? Promise.resolve(null) : ai.candidates(text, { ...opts, location: lp });
+  },
   onUpdate: () => renderSuggest(),
   isOnline: () => navigator.onLine,
   isConfigured: () => ai.configured(),
@@ -1105,14 +1146,21 @@ function renderSuggest(inp = getActiveAddInput()) {
       + esc([h.de && h.hu ? h.de : '', h.brand, variant && shortName(variant, h.brand)].filter(Boolean).join(' \u00b7 '))
       + '</span><i>' + label + '</i></button>';
   }).join('');
-  if (shoppingPlace.country === 'hu' && q === 'tej') {
+  const lp = activeAddPlace();
+  if (lp === 'none') {
+    box.innerHTML = histHtml;
+    box.hidden = !hits.length;
+    if (!box.hidden) positionSuggest(inp);
+    return;
+  }
+  if (lp.country === 'hu' && q === 'tej') {
     const plainMilkHtml = '<button type="button" class="sug" data-plain-hu="Tej" data-plain-icon="milk"><b>Tej</b><span>márka és típus a listán választható</span></button>';
     box.innerHTML = plainMilkHtml + histHtml;
     box.hidden = false;
     positionSuggest(inp);
     return;
   }
-  const tips = dictionaryTips(q, shoppingPlace.country);
+  const tips = dictionaryTips(q, lp.country);
   const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
   const st = typingCands.getState();
   const match = q.length >= 3 && st.text.toLowerCase() === q;
@@ -1127,10 +1175,10 @@ function renderSuggest(inp = getActiveAddInput()) {
     return '<button type="button" class="cand" data-cand="' + i + '">' + img +
       '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(store) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
       (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
-      '<span class="cprice">' + esc(eur(c.price)) + '</span></button>';
+      '<span class="cprice">' + esc(eur(c.price, lp)) + '</span></button>';
   }).join('');
   const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
-  const catalogHits = lookupHuCatalog(huCatalog, q, shoppingPlace.country);
+  const catalogHits = lookupHuCatalog(huCatalog, q, lp.country);
   const catalogHtml = catalogHits.length ? '<div class="shead">Konkrét termékek</div>' + catalogHits.map(({ gtin, name, brand, quantity }) => {
     const title = brand && !name.toLowerCase().startsWith(brand.toLowerCase()) ? brand + ' · ' + name : name;
     return '<button type="button" class="sug" data-off-gtin="' + esc(gtin) + '"><b>' + esc(title) + '</b><span>'
@@ -1142,7 +1190,8 @@ function renderSuggest(inp = getActiveAddInput()) {
 }
 function suggest(inp = getActiveAddInput()) {
   if (!inp) return;
-  if (shoppingPlace.country === 'hu' && inp.value.trim().length >= 3) void loadHuCatalog();
+  const lp = activeAddPlace();
+  if (lp !== 'none' && lp.country === 'hu' && inp.value.trim().length >= 3) void loadHuCatalog();
   typingCands.input(inp.value);
   renderSuggest(inp);
 }
@@ -1195,7 +1244,8 @@ $('suggest').addEventListener('click', (ev) => {
   }
   const product = ev.target.closest('button[data-off-gtin]');
   if (product) {
-    const row = lookupHuCatalog(huCatalog, inp?.value || '', shoppingPlace.country)
+    const lp = listPlace(listById(lid));
+    const row = lookupHuCatalog(huCatalog, inp?.value || '', lp !== 'none' ? lp.country : 'de')
       .find(({ gtin }) => gtin === product.dataset.offGtin);
     if (!row) return;
     const id = uid();
@@ -1210,7 +1260,8 @@ $('suggest').addEventListener('click', (ev) => {
   const tip = ev.target.closest('button[data-tip]');
   if (tip) {
     const query = inp?.value || '';
-    const row = dictionaryTips(query, shoppingPlace.country)[Number(tip.dataset.tip)];
+    const lp = listPlace(listById(lid));
+    const row = dictionaryTips(query, lp !== 'none' ? lp.country : 'de')[Number(tip.dataset.tip)];
     if (!row) return;
     const [hu, de, icon, cat] = row;
     const id = uid();
@@ -1229,7 +1280,8 @@ $('suggest').addEventListener('click', (ev) => {
     if (!c) return;
     const it = addWithCandidate(inp?.value || '', c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates, matched: st.matched });
     it.list = lid;
-    it.offerPlace = placeKey(shoppingPlace);
+    const lp = listPlace(listById(lid));
+    if (lp !== 'none') it.offerPlace = placeKey(lp);
     items[it.id] = it;
     queueItemSync(it);
     persist(); render(); reveal(it.id); kickEnrich();
@@ -1309,12 +1361,13 @@ function openEditor(id, d = null) {
   const curListId = it.list && lists.some((l) => l.id === it.list) ? it.list : targetListForAdd();
   $('edList').innerHTML = lists.map((l) => '<option value="' + esc(l.id) + '"' + (l.id === curListId ? ' selected' : '') + '>' + esc(l.name) + '</option>').join('');
   // pack sizes (round 12): Tomi picks one; the default (his usual band) is preselected
-  const vs = id ? it.offer?.variants || [] : [], cur = id ? chosenVariant(it) : null;
+  const lp = id ? itemPlace(it) : listPlace(listById(curListId));
+  const vs = id && lp !== 'none' ? it.offer?.variants || [] : [], cur = id && lp !== 'none' ? chosenVariant(it) : null;
   $('edVarWrap').hidden = vs.length < 2;
   $('edVariant').innerHTML = (cur ? '' : '<option value="">válassz…</option>') + vs.map((v) => '<option value="' + esc(v.name) + '"' + (cur && cur.name === v.name ? ' selected' : '') + '>' +
-    esc(shortName(v.name, it.brand) + ' · ' + v.unit + ' · ' + eur(v.value)) + '</option>').join('');
+    esc(shortName(v.name, it.brand) + ' · ' + v.unit + ' · ' + eur(v.value, lp)) + '</option>').join('');
   $('edPrice').value = it.myPrice ? String(it.myPrice.value).replace('.', ',') : ''; $('edStore').value = it.myPrice?.store || '';
-  $('edPrice').placeholder = it.offer?.price ? eur(it.offer.price.value) + ' (gép)' : 'pl. 1,29';
+  $('edPrice').placeholder = lp !== 'none' && it.offer?.price ? eur(it.offer.price.value, lp) + ' (gép)' : 'pl. 1,29';
   $('edDelete').hidden = !id;
   const e = (id ? it.enrich : d?.enrich) || {}, lines = [];
   // old items may carry a search-page link from earlier versions: only an exact product (barcode) link is shown
@@ -1322,16 +1375,16 @@ function openEditor(id, d = null) {
   if (d?.barcode || it.barcode) lines.push('Vonalkód: ' + esc(d?.barcode || it.barcode) + (d?.note ? ' <span class="est">(' + esc(d.note) + ')</span>' : ''));
   if (id && it.recogSrc) lines.push('Felismerés: ' + esc(it.recogSrc) + ' <span class="est">(javaslat, javítható)</span>');
   if (id && it.alts?.length) lines.push('Más javaslat: ' + it.alts.map((c, i) => '<button type="button" class="ghost take alt" data-i="' + i + '">' + esc(c.hu || c.de) + (c.brand ? ' · ' + esc(c.brand) : '') + '</button>').join(' '));
-  const of = id ? it.offer : null;
+  const of = id && lp !== 'none' ? it.offer : null;
   const edCands = of?.candidates?.length ? sortCandidates(of.candidates) : [];
-  if (edCands.length) lines.push('Bolti ajánlatok (egységár szerint): ' + edCands.map((c, i) => '<button type="button" class="ghost take candpick" data-i="' + i + '">' + esc(c.store + shopScope(c) + ': ' + candidateTitle(c) + ' · ' + eur(c.price) + (c.unitPriceText ? ' (' + c.unitPriceText + ')' : '')) + '</button>').join(' '));
-  if (of?.price) lines.push('Ár: <b>' + esc(priceText(of.price)) + '</b>' + (of.price.base ? ' · ' + esc(of.price.base) : '') + ' <span class="note">(a bolti oldalról, ' + esc(of.price.date) + ')</span>');
+  if (edCands.length) lines.push('Bolti ajánlatok (egységár szerint): ' + edCands.map((c, i) => '<button type="button" class="ghost take candpick" data-i="' + i + '">' + esc(c.store + shopScope(c) + ': ' + candidateTitle(c) + ' · ' + eur(c.price, lp) + (c.unitPriceText ? ' (' + c.unitPriceText + ')' : '')) + '</button>').join(' '));
+  if (of?.price) lines.push('Ár: <b>' + esc(priceText(of.price, false, lp)) + '</b>' + (of.price.base ? ' · ' + esc(of.price.base) : '') + ' <span class="note">(a bolti oldalról, ' + esc(of.price.date) + ')</span>');
   else if (of) lines.push('Ár: nem találtam <span class="note">(ellenőrizve ' + esc(String(of.checked || '').slice(0, 10)) + ')</span>');
   for (const st of of?.notSold || []) lines.push(esc(st) + ': <span class="est">online nem mutat árat</span> <span class="note">(a boltban lehet, hogy kapható)</span>');
   if (of?.link && safeUrl(of.link.url)) lines.push('<a href="' + esc(of.link.url) + '" target="_blank" rel="noopener noreferrer">Termékoldal: ' + esc(of.link.store) + '</a> <span class="note">(ellenőrzött)</span>');
   const ph = pharmacyNote(of);
-  if (ph) lines.push('Online patika (legolcsóbb, szállítás nélkül): ' + (safeUrl(ph.url) ? '<a href="' + esc(ph.url) + '" target="_blank" rel="noopener noreferrer">' + esc(priceText(ph)) + '</a>' : esc(priceText(ph))));
-  if (of?.price && of?.alt) lines.push('Olcsóbb máshol: ' + (safeUrl(of.alt.url) ? '<a href="' + esc(of.alt.url) + '" target="_blank" rel="noopener noreferrer">' + esc(priceText(of.alt)) + '</a>' : esc(priceText(of.alt))) + ' <span class="note">(bolti oldal)</span>');
+  if (ph) lines.push('Online patika (legolcsóbb, szállítás nélkül): ' + (safeUrl(ph.url) ? '<a href="' + esc(ph.url) + '" target="_blank" rel="noopener noreferrer">' + esc(priceText(ph, false, lp)) + '</a>' : esc(priceText(ph, false, lp))));
+  if (of?.price && of?.alt) lines.push('Olcsóbb máshol: ' + (safeUrl(of.alt.url) ? '<a href="' + esc(of.alt.url) + '" target="_blank" rel="noopener noreferrer">' + esc(priceText(of.alt, false, lp)) + '</a>' : esc(priceText(of.alt, false, lp))) + ' <span class="note">(bolti oldal)</span>');
   const nameAuto = id && it.de && it.enrich?.autoVals?.de === it.de;
   if (nameAuto) { const nc = nameCheck(it.de, of); if (nc.state === 'ok') lines.push('Német név: egyezik a bolti termékkel <span class="note">(' + esc(nc.store) + ')</span>');
     else if (nc.state === 'differs') lines.push('Német név: <span class="est">eltér a bolti terméktől</span>, a boltban: <b>' + esc(nc.name) + '</b> <span class="note">(javítsd, ha kell)</span>'); }
@@ -1383,8 +1436,10 @@ $('edForm').addEventListener('submit', async () => {
     ...(!$('edListWrap').hidden ? { list: $('edList').value } : {}),
     ...(!$('edVarWrap').hidden ? { variant: $('edVariant').value } : {}) };
   // own price: always wins over the machine's ("saját"); an empty field removes it
+  const targetLid = (!$('edListWrap').hidden ? $('edList').value : '') || (editing ? items[editing]?.list : targetListForAdd());
+  const lp = listPlace(listById(targetLid));
   const pv = Number($('edPrice').value.replace(',', '.').replace(/[^\d.]/g, ''));
-  const myPrice = pv > 0 && pv < (shoppingPlace.country === 'hu' ? 1000000 : 10000) ? { value: Math.round(pv * 100) / 100, store: $('edStore').value.trim().slice(0, 30), date: new Date().toISOString().slice(0, 10) } : null;
+  const myPrice = pv > 0 && pv < (lp !== 'none' && lp.country === 'hu' ? 1000000 : 10000) ? { value: Math.round(pv * 100) / 100, store: $('edStore').value.trim().slice(0, 30), date: new Date().toISOString().slice(0, 10) } : null;
   let id = editing;
   if (!id) { // new item from the scanner
     if (!v.hu && !v.de) { setStatus('Név nélkül nem mentettem.'); return; }
@@ -1580,7 +1635,7 @@ async function kickRecognize() {
 const OFFER_TTL = 3 * 864e5, OFFER_POLL_MS = 60000;
 // a function declaration: the start-up migration (above) already needs it
 function offerKey(it) { return [it.hu || '', it.de || '', it.brand || '', it.barcode || ''].join('|').toLowerCase(); }
-const needsOffer = (it) => (it.hu || it.de) && !it.recog?.match?.(/pending/) && (it.offerForce || !it.offer || it.offer.key !== offerKey(it) ||
+const needsOffer = (it) => itemPlace(it) !== 'none' && (it.hu || it.de) && !it.recog?.match?.(/pending/) && (it.offerForce || !it.offer || it.offer.key !== offerKey(it) ||
   // an answer from before round 11 (no pharmacy field): asked once more; the machine answers from its
   // cache, and searches the online pharmacies for pharmacy items (Tomi 11104)
   !('pharmacy' in it.offer) ||
@@ -1599,10 +1654,13 @@ async function kickOffers() {
   let reached = true;
   try {
     for (const it of Object.values(items).filter(needsOffer).sort((a, b) => (b.order || 0) - (a.order || 0))) {
+      const lp = itemPlace(it);
+      if (lp === 'none') continue;
       it.offerAsked = Date.now();
-      const scope = placeKey(shoppingPlace);
-      const r = await ai.offer(it, { refresh: !!it.offerForce, location: shoppingPlace });
-      if (scope !== placeKey(shoppingPlace)) break;
+      const scope = placeKey(lp);
+      const r = await ai.offer(it, { refresh: !!it.offerForce, location: lp });
+      const curLp = itemPlace(it);
+      if (curLp === 'none' || scope !== placeKey(curLp)) break;
       if (!r) { reached = false; if (refreshRun) refreshRun.down = true; break; } // machine not reachable: try again later
       if (r.pending) { persist(); continue; }
       const now = items[it.id]; if (!now) continue;
@@ -2198,7 +2256,7 @@ function queueMetaSync(l) {
   accountSync.queueListMeta(l);
   if (!l.shareId) return;
   const bucket = ensurePendingBucket(l.shareId);
-  bucket.meta = { name: l.name, repeat: l.repeat || 'none', weekday: l.weekday ?? 1, color: l.color || '', updatedAt: Date.now() };
+  bucket.meta = { name: l.name, repeat: l.repeat || 'none', weekday: l.weekday ?? 1, color: l.color || '', place: normalizeListPlace(l.place), updatedAt: Date.now() };
   savePendingSync();
   scheduleSyncFlush(l.shareId);
 }
@@ -2268,11 +2326,13 @@ function applyRemoteSnapshot(list, snapshot) {
     const nextColor = typeof snapshot.meta.color === 'string' && snapshot.meta.color.trim()
       ? snapshot.meta.color.trim().slice(0, 20)
       : (snapshot.meta.color === '' ? null : (list.color || null));
-    if (list.name !== nextName || list.repeat !== nextRepeat || list.weekday !== nextWeekday || (list.color || null) !== nextColor) {
+    const nextPlace = 'place' in snapshot.meta ? normalizeListPlace(snapshot.meta.place) : normalizeListPlace(list.place);
+    if (list.name !== nextName || list.repeat !== nextRepeat || list.weekday !== nextWeekday || (list.color || null) !== nextColor || JSON.stringify(list.place ?? null) !== JSON.stringify(nextPlace)) {
       list.name = nextName;
       list.repeat = nextRepeat;
       list.weekday = nextWeekday;
       list.color = nextColor;
+      list.place = nextPlace;
       changed = true;
     }
   }
@@ -2306,7 +2366,8 @@ function applyRemoteSnapshot(list, snapshot) {
         changed = true;
       }
     } else {
-      items[id] = { ...win, list: list.id, offerPlace: placeKey(shoppingPlace) };
+      const lp = listPlace(list);
+      items[id] = { ...win, list: list.id, ...(lp !== 'none' ? { offerPlace: placeKey(lp) } : {}) };
       changed = true;
     }
   }
@@ -2407,7 +2468,7 @@ $('lmShareLive').addEventListener('click', async () => {
       it.updatedBy = it.updatedBy || deviceId;
       return normalizeSharedItem(it, { updatedAt: now, updatedBy: deviceId });
     }).filter(Boolean);
-    const { shareId } = await prov.createSharedList({ name: l.name, repeat: l.repeat, weekday: l.weekday, color: l.color || '', createdAt: now }, listItems);
+    const { shareId } = await prov.createSharedList({ name: l.name, repeat: l.repeat, weekday: l.weekday, color: l.color || '', place: normalizeListPlace(l.place), createdAt: now }, listItems);
     l.shareId = shareId;
     syncStates.set(shareId, 'synced');
     accountSync.queueListMeta(l);
@@ -2500,7 +2561,18 @@ $('ldColorDefault').addEventListener('click', () => {
 function syncRepeatDayVisibility() {
   $('ldDayWrap').hidden = $('ldRepeat').value !== 'weekly';
 }
+function syncListPlaceVisibility() {
+  const isCustom = $('ldPlaceMode').value === 'custom';
+  $('ldPlaceCustom').hidden = !isCustom;
+  $('ldPlaceName').required = isCustom;
+}
 $('ldRepeat').addEventListener('change', syncRepeatDayVisibility);
+$('ldPlaceMode').addEventListener('change', syncListPlaceVisibility);
+$('ldPlaceCountry').addEventListener('change', () => {
+  const l = editingListId ? lists.find((x) => x.id === editingListId) : null;
+  const base = l?.place && typeof l.place === 'object' ? l.place : shoppingPlace;
+  $('ldPlaceName').value = $('ldPlaceCountry').value === base.country ? base.place : '';
+});
 function openListDialog(listId) {
   editingListId = listId;
   const l = listId ? lists.find((x) => x.id === listId) : null;
@@ -2509,8 +2581,26 @@ function openListDialog(listId) {
   $('ldRepeat').value = l ? (l.repeat || 'none') : 'none';
   $('ldWeekday').value = String(l && Number.isInteger(l.weekday) ? l.weekday : 1);
   selectedListColor = l?.color || null;
+  const lp = normalizeListPlace(l?.place);
+  if (lp === 'none') {
+    $('ldPlaceMode').value = 'none';
+    $('ldPlaceCountry').value = shoppingPlace.country;
+    $('ldPlaceName').value = shoppingPlace.place;
+    $('ldPlaceRadius').value = String(shoppingPlace.radius);
+  } else if (lp) {
+    $('ldPlaceMode').value = 'custom';
+    $('ldPlaceCountry').value = lp.country;
+    $('ldPlaceName').value = lp.place;
+    $('ldPlaceRadius').value = String(lp.radius);
+  } else {
+    $('ldPlaceMode').value = 'default';
+    $('ldPlaceCountry').value = shoppingPlace.country;
+    $('ldPlaceName').value = shoppingPlace.place;
+    $('ldPlaceRadius').value = String(shoppingPlace.radius);
+  }
   renderListColorPicker();
   syncRepeatDayVisibility();
+  syncListPlaceVisibility();
   $('listDialog').showModal();
   $('ldName').focus();
 }
@@ -2521,19 +2611,36 @@ $('ldForm').addEventListener('submit', (e) => {
   if (!name) { $('ldName').focus(); return; }
   const repeat = $('ldRepeat').value;
   const weekday = Number($('ldWeekday').value);
+  const placeMode = $('ldPlaceMode').value;
+  let place = null;
+  if (placeMode === 'none') {
+    place = 'none';
+  } else if (placeMode === 'custom') {
+    place = normalizePlace({
+      country: $('ldPlaceCountry').value,
+      place: $('ldPlaceName').value,
+      radius: Number($('ldPlaceRadius').value),
+    });
+    if (!place) { $('ldPlaceName').focus(); return; }
+  }
   if (editingListId) {
     const l = lists.find((x) => x.id === editingListId);
+    let placeChanged = false;
     if (l) {
       const wasNone = !l.repeat || l.repeat === 'none';
+      placeChanged = JSON.stringify(l.place ?? null) !== JSON.stringify(place);
       l.name = name;
       l.repeat = repeat;
       l.weekday = weekday;
       l.color = selectedListColor || null;
+      l.place = place;
       if (repeat !== 'none' && (wasNone || !l.lastReset)) l.lastReset = Date.now();
       queueMetaSync(l);
     }
     $('listDialog').close();
+    if (placeChanged) typingCands.clear();
     persist(); render();
+    if (placeChanged) kickOffers();
     setStatus('Lista mentve: ' + name);
   } else {
     const nl = normalizeList({
@@ -2544,6 +2651,7 @@ $('ldForm').addEventListener('submit', (e) => {
       weekday,
       lastReset: repeat !== 'none' ? Date.now() : 0,
       color: selectedListColor || null,
+      place,
     });
     lists.push(nl);
     accountSync.queueListMeta(nl);
@@ -2563,6 +2671,7 @@ $('scShareYes').addEventListener('click', () => {
   lists = addIncomingList(lists, items, nl).lists;
   accountSync.queueListMeta(nl);
   const baseOrder = Date.now();
+  const lp = listPlace(nl);
   data.items.forEach((raw, idx) => {
     const id = uid();
     items[id] = applyBrand({
@@ -2576,7 +2685,7 @@ $('scShareYes').addEventListener('click', () => {
       group: raw.group,
       done: false,
       order: baseOrder + idx,
-      offerPlace: placeKey(shoppingPlace),
+      ...(lp !== 'none' ? { offerPlace: placeKey(lp) } : {}),
     });
     accountSync.queueItem(items[id], nl);
   });
@@ -2608,6 +2717,7 @@ $('jcYes').addEventListener('click', async () => {
     weekday: Number.isInteger(meta.weekday) ? meta.weekday : 1,
     lastReset: 0,
     color: typeof meta.color === 'string' && meta.color.trim() ? meta.color.trim().slice(0, 20) : null,
+    place: normalizeListPlace(meta.place),
     shareId,
   });
   lists = addIncomingList(lists, items, nl).lists;

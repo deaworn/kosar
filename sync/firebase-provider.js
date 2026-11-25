@@ -4,6 +4,7 @@
 
 import { generateShareId, isValidShareId } from './provider.js';
 import { normalizeSharedItem } from './merge.js';
+import { normalizeListPlace } from '../lists.js';
 
 const FIREBASE_VERSION = '13.2.0';
 const CDN_BASE = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
@@ -111,6 +112,10 @@ export function createFirebaseProvider() {
       };
       if (typeof listMeta?.color === 'string' && listMeta.color.trim()) {
         meta.color = listMeta.color.trim().slice(0, 20);
+      }
+      const place = normalizeListPlace(listMeta?.place);
+      if (place) {
+        meta.place = place;
       }
 
       const batch = writeBatch(db);
@@ -226,6 +231,11 @@ export function createFirebaseProvider() {
         }
         if (typeof changes.meta.color === 'string') {
           metaPatch.color = changes.meta.color.trim().slice(0, 20);
+        }
+        if ('place' in changes.meta) {
+          const place = normalizeListPlace(changes.meta.place);
+          if (place) metaPatch.place = place;
+          else if (typeof sdk.fsMod.deleteField === 'function') metaPatch.place = sdk.fsMod.deleteField();
         }
         metaPatch.updatedAt = Number(changes.meta.updatedAt) || Date.now();
         batch.set(doc(db, 'sharedLists', shareId), metaPatch, { merge: true });

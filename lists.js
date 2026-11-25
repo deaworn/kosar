@@ -1,6 +1,8 @@
 // Pure logic for multiple shopping lists, daily/weekly repeat resets,
 // migration from the single-list schema, and #list= share link encoding/decoding.
 
+import { DEFAULT_PLACE, normalizePlace } from './shopping-place.js';
+
 export const DEFAULT_LIST_ID = 'default';
 export const DEFAULT_LIST_NAME = 'Bevásárlás';
 
@@ -67,6 +69,33 @@ export function localDayStart(ts = Date.now()) {
 }
 
 /**
+ * Normalizes a list's optional `place` override:
+ * - `'none'` -> `'none'` (not tied to any country)
+ * - valid `{ country, place, radius }` -> normalized place object
+ * - anything else (null, undefined, invalid) -> `null` (inherit global place)
+ */
+export function normalizeListPlace(raw) {
+  if (raw === 'none') return 'none';
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return normalizePlace(raw);
+  }
+  return null;
+}
+
+/**
+ * Resolves the effective shopping place for a list:
+ * - `'none'` if the list is explicitly not tied to any country
+ * - the list's own normalized place object if valid
+ * - otherwise falls back to the normalized global place (or DEFAULT_PLACE).
+ */
+export function resolveListPlace(list, globalPlace) {
+  const own = normalizeListPlace(list?.place);
+  if (own === 'none') return 'none';
+  if (own) return own;
+  return (globalPlace && typeof globalPlace === 'object' ? normalizePlace(globalPlace) : null) || { ...DEFAULT_PLACE };
+}
+
+/**
  * Normalizes a list object, filling defaults for missing or invalid fields.
  */
 export function normalizeList(raw, fallbackId = DEFAULT_LIST_ID) {
@@ -87,6 +116,7 @@ export function normalizeList(raw, fallbackId = DEFAULT_LIST_ID) {
   const color = typeof src.color === 'string' && /^[a-z0-9_-]{1,20}$/.test(src.color.trim())
     ? src.color.trim()
     : null;
+  const place = normalizeListPlace(src.place);
   const out = {
     id,
     name,
@@ -95,6 +125,7 @@ export function normalizeList(raw, fallbackId = DEFAULT_LIST_ID) {
     weekday,
     lastReset,
     color,
+    place,
   };
   if (shareId) out.shareId = shareId;
   return out;

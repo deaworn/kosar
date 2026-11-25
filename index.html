@@ -258,6 +258,26 @@
       <button type="button" class="ghost ld-default-color" id="ldColorDefault" aria-pressed="true">Alapértelmezett (a téma színe)</button>
       <div id="ldColorSwatches" class="swatch-groups"></div>
     </div>
+    <div class="ld-place-wrap">
+      <label>Vásárlási hely ehhez a listához
+        <select id="ldPlaceMode">
+          <option value="default">Alapértelmezett (a globális hely)</option>
+          <option value="custom">Saját hely ennek a listának</option>
+          <option value="none">Nincs országhoz kötve</option>
+        </select>
+      </label>
+      <div id="ldPlaceCustom" class="ld-place-custom" hidden>
+        <label>Ország
+          <select id="ldPlaceCountry"><option value="de">Németország</option><option value="at">Ausztria</option><option value="hu">Magyarország</option></select>
+        </label>
+        <label>Irányítószám vagy város
+          <input id="ldPlaceName" maxlength="100" autocomplete="off">
+        </label>
+        <label>Körzet
+          <select id="ldPlaceRadius"><option value="0">Csak a város</option><option value="5">5 km</option><option value="10">10 km</option><option value="25">25 km</option></select>
+        </label>
+      </div>
+    </div>
     <div class="edbtns"><span class="grow"></span><button type="button" class="ghost" id="ldCancel">Mégse</button><button type="submit" class="primary" id="ldSave">Mentés</button></div>
   </form>
 </dialog>

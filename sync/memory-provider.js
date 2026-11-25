@@ -3,6 +3,7 @@
 
 import { generateShareId, isValidShareId } from './provider.js';
 import { mergeSharedState, normalizeSharedItem, normalizeTombstone } from './merge.js';
+import { normalizeListPlace } from '../lists.js';
 
 function clone(val) {
   return JSON.parse(JSON.stringify(val));
@@ -57,6 +58,10 @@ export function createMemoryProvider(store = createMemoryStore()) {
       };
       if (typeof listMeta?.color === 'string' && listMeta.color.trim()) {
         meta.color = listMeta.color.trim().slice(0, 20);
+      }
+      const place = normalizeListPlace(listMeta?.place);
+      if (place) {
+        meta.place = place;
       }
       const items = {};
       for (const raw of initialItems) {
@@ -122,6 +127,11 @@ export function createMemoryProvider(store = createMemoryStore()) {
         }
         if (typeof changes.meta.color === 'string') {
           entry.meta.color = changes.meta.color.trim().slice(0, 20);
+        }
+        if ('place' in changes.meta) {
+          const place = normalizeListPlace(changes.meta.place);
+          if (place) entry.meta.place = place;
+          else delete entry.meta.place;
         }
         entry.meta.updatedAt = Number(changes.meta.updatedAt) || Date.now();
       }
