@@ -532,7 +532,9 @@ function rowHtml(it) {
     '<button type="button" class="step-btn" data-act="dec" aria-label="Kevesebb"' + (count <= 1 ? ' disabled' : '') + '>−</button>' +
     '<span class="step-val">' + count + '</span>' +
     '<button type="button" class="step-btn" data-act="inc" aria-label="Több"' + (count >= 99 ? ' disabled' : '') + '>+</button>' +
-    '</div></div>' + chooserHtml(it);
+    '</div>' +
+    '<button type="button" class="row-del" data-act="delete" aria-label="' + esc(it.hu || it.de || 'Tétel') + ' törlése"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-9 0 1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>' +
+    '</div>' + chooserHtml(it);
 }
 
 const WEEKDAY_SHORT = ['V', 'H', 'K', 'Sze', 'Cs', 'P', 'Szo'];
@@ -688,6 +690,7 @@ $('list').addEventListener('click', (ev) => {
     const next = btn.dataset.act === 'inc' ? Math.min(99, cur + 1) : Math.max(1, cur - 1);
     if (next !== cur) edit(id, { count: next });
   }
+  else if (btn.dataset.act === 'delete') { remove(id); setStatus('Törölve: ' + (it.hu || it.de)); }
   else if (btn.dataset.act === 'zoom') openZoom(pics(it));
   else if (btn.dataset.act === 'pick') {
     const c = activeCandidates(it)[Number(btn.dataset.i)];
