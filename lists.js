@@ -81,14 +81,45 @@ export function normalizeList(raw, fallbackId = DEFAULT_LIST_ID) {
   const lastReset = Number.isFinite(Number(src.lastReset)) && Number(src.lastReset) > 0
     ? Number(src.lastReset)
     : 0;
-  return {
+  const shareId = typeof src.shareId === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(src.shareId.trim())
+    ? src.shareId.trim()
+    : '';
+  const color = typeof src.color === 'string' && /^[a-z0-9_-]{1,20}$/.test(src.color.trim())
+    ? src.color.trim()
+    : null;
+  const out = {
     id,
     name,
     collapsed: Boolean(src.collapsed),
     repeat,
     weekday,
     lastReset,
+    color,
   };
+  if (shareId) out.shareId = shareId;
+  return out;
+}
+
+/**
+ * Adds an incoming (shared or received) list to `lists`.
+ * If the only existing list is the untouched empty default list, replaces it
+ * instead of keeping an empty duplicate alongside the incoming list.
+ */
+export function addIncomingList(existingLists, items, incomingList) {
+  const incoming = normalizeList(incomingList, incomingList?.id || DEFAULT_LIST_ID);
+  const current = Array.isArray(existingLists) ? existingLists : [];
+  if (current.length === 1) {
+    const only = current[0];
+    const isDefault = only && only.id === DEFAULT_LIST_ID && only.name === DEFAULT_LIST_NAME && !only.shareId;
+    if (isDefault) {
+      const listValues = items && typeof items === 'object' ? Object.values(items) : [];
+      const hasItems = listValues.some((it) => it && typeof it === 'object' && !it.deleted && (!it.list || it.list === only.id));
+      if (!hasItems) {
+        return { lists: [incoming], replaced: true };
+      }
+    }
+  }
+  return { lists: [...current, incoming], replaced: false };
 }
 
 /**

@@ -1,12 +1,21 @@
-/* Dark only (by request). Based on the previous artifact look. System fonts, so it renders offline. */
-:root{
-  --bg:#0f1412; --card:#171e1b; --ink:#e9efeb; --muted:#93a099; --line:#26302b;
-  --accent:#3fcf8e; --accent-ink:#06130d; --done:#56625c; --warn:#f08a5d; --est:#d9b45a;
-  --tint:#18271f; --tint-hi:#24382e; --tint-edge:rgba(255,255,255,.07);
+/* Dark & light modes + independent accent variables (set on <html> and optionally per .lcard). */
+:root,
+[data-mode="dark"]{
   color-scheme:dark;
+  --bg:#131314; --card:#1c1d1f; --ink:#f1f3f4; --muted:#9aa0a6; --line:#2c2e32;
+  --done:#757b82; --warn:#f87171; --tint-edge:rgba(255,255,255,.07);
+  --accent:#ff6d2d; --accent-ink:#111113; --est:#ffd54f;
+  --grad:linear-gradient(135deg, #ff6d2d 0%, #ff9e2c 52%, #ffd54f 100%);
+  --tint:color-mix(in srgb, var(--accent) 14%, var(--bg));
+  --tint-hi:color-mix(in srgb, var(--accent) 22%, var(--bg));
   --f-display:"Segoe UI", Roboto, system-ui, sans-serif;
   --f-body:Roboto, "Segoe UI", system-ui, sans-serif;
   --f-mono:"Roboto Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+[data-mode="light"]{
+  color-scheme:light;
+  --bg:#f4f6f8; --card:#ffffff; --ink:#14171a; --muted:#525c66; --line:#dde2e7;
+  --done:#78828c; --warn:#dc2626; --tint-edge:rgba(0,0,0,.05);
 }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -21,7 +30,8 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);padding:calc(18px + 
 .ring .track{stroke:var(--line)}
 .ring .bar{stroke:var(--accent);stroke-linecap:round;transition:stroke-dashoffset .4s ease;transform:rotate(-90deg);transform-origin:50% 50%}
 .ring text{fill:var(--ink);font-family:var(--f-mono);font-size:15px;dominant-baseline:central;text-anchor:middle}
-h1{font-family:var(--f-display);font-weight:800;font-size:1.65rem;letter-spacing:-.02em;margin:0;line-height:1.05}
+h1{font-family:var(--f-display);font-weight:800;font-size:1.75rem;letter-spacing:-.025em;margin:0;line-height:1.08;
+  display:inline-block;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{color:var(--muted);font-size:.9rem;margin-top:3px}
 .sub b{color:var(--ink)}
 .net{flex:none;border:1px solid var(--line);background:var(--card);color:var(--muted);border-radius:999px;padding:6px 10px;font:inherit;font-size:.75rem;display:flex;align-items:center;gap:6px}
@@ -53,7 +63,7 @@ ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .tag{display:inline-block;font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:0 5px;margin-left:6px;vertical-align:2px;font-family:var(--f-body);font-weight:700}
 .qty{flex:none;font-family:var(--f-mono);font-size:.85rem;color:var(--muted);text-align:right;max-width:30%}
 .item.done{opacity:.6}
-.item.done .box{background:var(--accent);border-color:var(--accent)}
+.item.done .box{background:var(--grad);border-color:transparent}
 .item.done .box svg{opacity:1}
 .item.done .hu{text-decoration:line-through;color:var(--done)}
 .item.done .de{color:var(--done)}
@@ -62,7 +72,7 @@ ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .tools{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px;align-items:center}
 .ghost{background:none;border:1px solid var(--line);color:var(--muted);border-radius:999px;padding:9px 14px;font:inherit;font-size:.88rem;cursor:pointer}
 .danger{border-color:var(--warn);color:var(--warn)}
-.primary{background:var(--accent);color:var(--accent-ink);border:0;border-radius:999px;padding:9px 18px;font:inherit;font-weight:700;cursor:pointer}
+.primary{background:var(--grad);color:var(--accent-ink);border:0;border-radius:999px;padding:9px 18px;font:inherit;font-weight:700;cursor:pointer}
 .note{color:var(--muted);font-size:.85rem}
 .status{font-size:.82rem;color:var(--muted);margin-top:10px;min-height:1.2em}
 /* pull-down refresh (Tomi 11102, 11202): our own gesture (the browser would reload the page);
@@ -83,7 +93,7 @@ html,body{overscroll-behavior-y:contain}
 .addbar form{max-width:520px;margin:0 auto;display:grid;grid-template-columns:1fr auto;gap:8px}
 input,select{min-width:0;width:100%;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;font:inherit;color:var(--ink)}
 input:focus,select:focus{outline:2px solid var(--accent);outline-offset:0}
-.addbar button{background:var(--accent);color:var(--accent-ink);border:0;border-radius:12px;padding:0 18px;font:inherit;font-size:1.3rem;font-weight:700;cursor:pointer}
+.addbar button{background:var(--grad);color:var(--accent-ink);border:0;border-radius:12px;padding:0 18px;font:inherit;font-size:1.3rem;font-weight:700;cursor:pointer}
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:18px 18px 0 0;width:100%;max-width:520px;margin:auto auto 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom, 0px))}
 dialog::backdrop{background:rgba(0,0,0,.6)}
 dialog h2{font-family:var(--f-display);font-size:1.2rem;margin:0 0 12px}
@@ -193,7 +203,11 @@ li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:
 /* List cards with inline accordion items */
 .lcard-open:focus-visible,.lcard-new:focus-visible,.lmenubtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .lcards{display:grid;gap:12px;margin-top:6px}
-.lcard{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;transition:border-color .15s}
+.lcard{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;transition:border-color .15s;
+  --tint:color-mix(in srgb, var(--accent) 14%, var(--bg));
+  --tint-hi:color-mix(in srgb, var(--accent) 22%, var(--bg))}
+.lcard:not(.collapsed){border:1.5px solid transparent;
+  background:linear-gradient(var(--card), var(--card)) padding-box, var(--grad) border-box}
 .lcard-head{display:flex;align-items:stretch}
 .lcard-open{flex:1;min-width:0;display:grid;gap:7px;background:none;border:0;padding:13px 8px 13px 16px;text-align:left;color:inherit;font:inherit;cursor:pointer;border-radius:16px}
 .lcard-top{display:flex;align-items:center;gap:8px;min-width:0}
@@ -201,9 +215,14 @@ li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:
 .lcard-chev{flex:none;color:var(--muted);font-size:.9rem;line-height:1;transition:transform .22s ease}
 .lcard.collapsed .lcard-chev{transform:rotate(-90deg)}
 .lrep{flex:none;font-size:.7rem;color:var(--accent);border:1px solid var(--line);border-radius:999px;padding:2px 8px;background:var(--bg)}
+.lshared{flex:none;display:inline-flex;align-items:center;gap:5px;font-size:.7rem;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:2px 8px;background:var(--bg)}
+.lsdot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}
+.lshared.ok .lsdot{background:var(--accent)}
+.lshared.off .lsdot{background:var(--warn)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .lcard-prog{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
 .lbar{flex:1;min-width:48px;height:6px;border-radius:999px;background:var(--line);overflow:hidden}
-.lbar-fill{height:100%;background:var(--accent);border-radius:999px;transition:width .3s ease}
+.lbar-fill{height:100%;background:var(--grad);border-radius:999px;transition:width .3s ease}
 .lprog{flex:none;font-family:var(--f-mono);font-size:.8rem;color:var(--muted)}
 .lest{flex:none;font-family:var(--f-mono);font-size:.78rem;font-weight:700;color:var(--accent)}
 .lest-miss{font-family:var(--f-body);font-weight:400;color:var(--muted)}
@@ -242,3 +261,20 @@ li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:
 .lcard-new:hover{border-color:var(--accent);background:var(--tint)}
 .mitem.danger{border-color:var(--warn);color:var(--warn)}
 .mitem.danger span{color:var(--warn);opacity:.85}
+
+/* Theme & per-list colour pickers */
+.th-section,.ld-color-wrap{margin-bottom:14px}
+.ld-label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:8px}
+.mode-switch{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.mode-btn{background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:12px;padding:10px 14px;font:inherit;font-weight:700;cursor:pointer;transition:border-color .15s,background .15s}
+.mode-btn[aria-pressed="true"]{background:var(--grad);color:var(--accent-ink);border-color:transparent}
+.ld-default-color{width:100%;margin-bottom:10px;text-align:center}
+.ld-default-color[aria-pressed="true"]{border-color:var(--accent);color:var(--ink);background:var(--tint)}
+.swatch-groups{display:grid;gap:12px}
+.swatch-group-title{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px}
+.swatch-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(40px, 1fr));gap:10px}
+.swatch{width:40px;height:40px;border-radius:50%;border:2px solid transparent;padding:0;cursor:pointer;display:grid;place-items:center;margin:0 auto;box-shadow:inset 0 0 0 1px rgba(128,128,128,.25);transition:transform .12s}
+.swatch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.swatch[aria-pressed="true"]{border-color:var(--ink);transform:scale(1.06)}
+.swatch svg{width:18px;height:18px;fill:none;stroke-width:2.8;stroke-linecap:round;stroke-linejoin:round;opacity:0}
+.swatch[aria-pressed="true"] svg{opacity:1}

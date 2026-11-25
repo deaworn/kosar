@@ -16,7 +16,13 @@ import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
 import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, ownItemTips, pickCandidate, sortCandidates } from './candidates.js';
-import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, migrateToLists, applyListResets, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
+import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, migrateToLists, applyListResets, addIncomingList, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
+import { DEFAULT_MODE, DEFAULT_ACCENT, getAccent, isAccentAvailable, resolveAccentId, accentsForMode, accentCssVars, accentSwatchStyle } from './accents.js';
+import { FIREBASE_CONFIG } from './sync/config.js';
+import { createFirebaseProvider } from './sync/firebase-provider.js';
+import { createAccountSyncManager, createFirebaseAccountProvider } from './sync/account-sync.js';
+import { isValidShareId } from './sync/provider.js';
+import { mergeSharedState, normalizeSharedItem } from './sync/merge.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -52,6 +58,67 @@ let items = {}, lists = [], activeListId = DEFAULT_LIST_ID, savedAt = 0;
 try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
 try { const rawLists = JSON.parse(localStorage.getItem(LS_LISTS) || 'null'); if (Array.isArray(rawLists)) lists = rawLists; } catch { lists = []; }
 try { activeListId = localStorage.getItem(LS_ACTIVE_LIST) || DEFAULT_LIST_ID; } catch { activeListId = DEFAULT_LIST_ID; }
+const LS_MODE = 'bv.mode', LS_ACCENT = 'bv.accent';
+let themeMode = DEFAULT_MODE;
+try {
+  const savedMode = localStorage.getItem(LS_MODE);
+  if (savedMode === 'dark' || savedMode === 'light') themeMode = savedMode;
+  else if (window.matchMedia?.('(prefers-color-scheme: light)').matches) themeMode = 'light';
+} catch { /* default */ }
+let themeAccent = DEFAULT_ACCENT;
+try {
+  const savedAccent = localStorage.getItem(LS_ACCENT);
+  if (savedAccent) themeAccent = resolveAccentId(savedAccent, themeMode);
+} catch { /* default */ }
+
+function applyTheme() {
+  themeAccent = resolveAccentId(themeAccent, themeMode);
+  const root = document.documentElement;
+  root.dataset.mode = themeMode;
+  root.dataset.accent = themeAccent;
+  const vars = accentCssVars(themeAccent, themeMode);
+  for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) metaTheme.setAttribute('content', themeMode === 'light' ? '#f4f6f8' : '#131314');
+}
+applyTheme();
+
+function saveTheme() {
+  try {
+    localStorage.setItem(LS_MODE, themeMode);
+    localStorage.setItem(LS_ACCENT, themeAccent);
+  } catch { /* storage blocked */ }
+}
+
+function renderSwatchGroups(container, selectedId, mode, onPick) {
+  const avail = accentsForMode(mode);
+  const groups = [
+    { label: 'Sima színek', items: avail.filter((a) => a.kind === 'solid') },
+    { label: 'Átfolyó színek', items: avail.filter((a) => a.kind === 'gradient') },
+  ];
+  const stroke = mode === 'dark' ? '#111113' : '#ffffff';
+  container.innerHTML = groups.map((g) =>
+    '<div class="swatch-group">' +
+    '<div class="swatch-group-title">' + esc(g.label) + '</div>' +
+    '<div class="swatch-grid">' +
+    g.items.map((a) => {
+      const sel = a.id === selectedId;
+      const bg = accentSwatchStyle(a, mode);
+      return '<button type="button" class="swatch" data-accent-id="' + esc(a.id) + '" ' +
+        'title="' + esc(a.name) + '" aria-label="' + esc(a.name) + '" aria-pressed="' + sel + '" ' +
+        'style="background:' + esc(bg) + '">' +
+        '<svg viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5" stroke="' + stroke + '"/></svg>' +
+        '</button>';
+    }).join('') +
+    '</div></div>'
+  ).join('');
+  container.onclick = (ev) => {
+    const btn = ev.target.closest('.swatch[data-accent-id]');
+    if (!btn) return;
+    onPick(btn.dataset.accentId);
+  };
+}
+
 let storageOk = true, durableTimer = null;
 // Two copies: localStorage (instant at start-up) and IndexedDB (durable). Every
 // change goes to both; the IndexedDB write is coalesced over 300 ms.
@@ -152,8 +219,13 @@ function toggleList(id) {
 }
 
 function edit(id, patch) {
+  const prevListId = items[id]?.list;
   const it = items[id] || (items[id] = { id, list: patch.list || targetListForAdd(), offerPlace: placeKey(shoppingPlace) });
   Object.assign(it, patch);
+  if (prevListId && patch.list && prevListId !== patch.list) {
+    queueDeleteSync(prevListId, id);
+  }
+  queueItemSync(it);
   persist(); render(); kickEnrich();
 }
 // Deleted items go to the hist ("Korábbi tételek") with all their data; their
@@ -191,6 +263,7 @@ function saveHistory() {
 }
 function remove(id) {
   const it = items[id];
+  if (it) queueDeleteSync(it.list, id);
   if (it && (it.hu || it.de)) {
     // one hist entry per name: a newer delete of the same item replaces the older one
     for (const [k, h] of Object.entries(hist)) {
@@ -206,6 +279,7 @@ function restore(id) {
   const { deletedAt: _d, ...it } = h;
   const listId = it.list && lists.some((l) => l.id === it.list) ? it.list : targetListForAdd();
   items[id] = { ...it, list: listId, done: false, order: Date.now() };
+  queueItemSync(items[id]);
   delete hist[id]; saveHistory(); persist(); render(); reveal(id);
   setStatus('Visszahívva: ' + (it.hu || it.de));
 }
@@ -409,6 +483,13 @@ function repeatBadge(l) {
   if (l.repeat === 'daily') return '<span class="lrep">Naponta</span>';
   return '<span class="lrep">Hetente · ' + (WEEKDAY_SHORT[l.weekday] || 'H') + '</span>';
 }
+function sharedBadge(l) {
+  if (!l.shareId) return '';
+  const st = syncStates.get(l.shareId) || (navigator.onLine && FIREBASE_CONFIG ? 'synced' : 'offline');
+  const isSynced = st === 'synced' && navigator.onLine;
+  const label = isSynced ? 'szinkronban' : 'net nélkül, később küldi';
+  return '<span class="lshared ' + (isSynced ? 'ok' : 'off') + '" title="' + esc(label) + '"><span class="lsdot" aria-hidden="true"></span>közös<span class="sr-only"> (' + esc(label) + ')</span></span>';
+}
 
 // Bring a just-added item into view (new items sort to the end of their section).
 function reveal(id) {
@@ -470,6 +551,12 @@ function render() {
     const card = document.createElement('article');
     card.className = 'lcard' + (collapsed ? ' collapsed' : '');
     card.dataset.listId = l.id;
+    const listAccentId = l.color && isAccentAvailable(l.color, themeMode) ? l.color : null;
+    if (listAccentId) {
+      card.dataset.listAccent = listAccentId;
+      const vars = accentCssVars(listAccentId, themeMode);
+      for (const [k, v] of Object.entries(vars)) card.style.setProperty(k, v);
+    }
 
     const emptyMsg = lists.length === 1 && !all.length
       ? 'Még nincs semmi a listán. Írd be lent, olvass be egy vonalkódot, vagy importáld a régi listát a ⋯ menüből.'
@@ -481,7 +568,7 @@ function render() {
     card.innerHTML = '<div class="lcard-head">' +
       '<button type="button" class="lcard-open" data-list-act="toggle" aria-expanded="' + (!collapsed) + '">' +
       '<div class="lcard-top"><span class="lcard-title">' + esc(l.name) + '</span>' +
-      (lists.length > 1 ? '<span class="lcard-chev" aria-hidden="true">▾</span>' : '') + repeatBadge(l) + '</div>' +
+      (lists.length > 1 ? '<span class="lcard-chev" aria-hidden="true">▾</span>' : '') + sharedBadge(l) + repeatBadge(l) + '</div>' +
       '<div class="lcard-prog"><div class="lbar" aria-hidden="true"><div class="lbar-fill" style="width:' + pct + '%"></div></div>' +
       '<span class="lprog">' + lDone + '/' + lTotal + '</span>' + estHtml + '</div>' +
       '<div class="lcard-prev">' + esc(prevText) + '</div></button>' +
@@ -671,6 +758,7 @@ $('suggest').addEventListener('click', (ev) => {
     it.list = targetListForAdd();
     it.offerPlace = placeKey(shoppingPlace);
     items[it.id] = it;
+    queueItemSync(it);
     persist(); render(); reveal(it.id); kickEnrich();
     $('inName').value = ''; typingCands.clear();
     setStatus('Felírva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
@@ -887,6 +975,7 @@ $('psGo').addEventListener('click', async () => {
 async function addPhotoItem(blob, extra = {}) {
   const id = uid();
   items[id] = { id, list: targetListForAdd(), hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), photo: true, recog: 'pending', ...extra };
+  queueItemSync(items[id]);
   persist();
   try { await setOwnPhoto(id, blob); } catch { setStatus('A fotót nem sikerült menteni (tárhely?).'); }
   if (!items[id].barcode) {
@@ -916,7 +1005,7 @@ async function onBarcode(code) {
   try { frame = await resizeImage($('scVideo')); } catch { /* no frame */ }
   closeScanner();
   if (frame) await addPhotoItem(frame, { barcode: code });
-  else { const id = uid(); items[id] = { id, list: targetListForAdd(), hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), recog: 'pending', barcode: code }; persist(); render(); kickRecognize(); }
+  else { const id = uid(); items[id] = { id, list: targetListForAdd(), hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), recog: 'pending', barcode: code }; queueItemSync(items[id]); persist(); render(); kickRecognize(); }
 }
 $('scPhoto').addEventListener('click', async () => {
   let frame = null;
@@ -1136,7 +1225,11 @@ function parseImport(text) {
 }
 async function importData({ rows, lists: impLists = [], photos, hist: h = {} }) {
   for (const l of impLists) {
-    if (l && l.id && !lists.some((x) => x.id === l.id)) lists.push(normalizeList(l, l.id));
+    if (l && l.id && !lists.some((x) => x.id === l.id)) {
+      const nl = normalizeList(l, l.id);
+      lists.push(nl);
+      accountSync.queueListMeta(nl);
+    }
   }
   for (const [id, e] of Object.entries(h)) if (!items[id] && !hist[id] && e && (e.hu || e.de)) hist[id] = e; // earlier items from a backup
   if (Object.keys(h).length) saveHistory();
@@ -1148,6 +1241,7 @@ async function importData({ rows, lists: impLists = [], photos, hist: h = {} }) 
     const listId = r.list && lists.some((l) => l.id === r.list) ? r.list : fallbackList;
     const cur = items[id];
     if (cur) { Object.assign(cur, r, { id, list: cur.list || listId }); updated++; } else { items[id] = { ...r, id, list: listId }; added++; }
+    queueItemSync(items[id]);
   }
   persist(); render(); kickEnrich();
   for (const [id, url] of Object.entries(photos)) {
@@ -1184,15 +1278,95 @@ $('imGo').addEventListener('click', async () => {
   setStatus('Importálva: ' + added + ' új' + (updated ? ', ' + updated + ' frissítve' : '') + (pics ? ', ' + pics + ' fotó' : '') + '.');
 });
 $('imCancel').addEventListener('click', () => $('importer').close());
+function updateAccountMenuUi() {
+  const user = accountSync?.getUser();
+  const titleEl = $('mAccountTitle');
+  const subEl = $('mAccountSub');
+  if (!titleEl || !subEl) return;
+  if (user) {
+    titleEl.textContent = 'Kijelentkezés';
+    const label = user.displayName && user.email
+      ? user.displayName + ' (' + user.email + ')'
+      : (user.email || user.displayName || 'Bejelentkezve');
+    subEl.textContent = label;
+  } else {
+    titleEl.textContent = 'Bejelentkezés Google-lel';
+    subEl.textContent = FIREBASE_CONFIG ? 'listák szinkronizálása az eszközeid között' : 'nincs beállítva';
+  }
+}
+
 $('menuBtn').addEventListener('click', () => {
+  updateAccountMenuUi();
   $('mPlaceSub').textContent = COUNTRIES[shoppingPlace.country].label + ' \u00b7 ' + shoppingPlace.place;
+  $('mThemeSub').textContent = (themeMode === 'light' ? 'Világos' : 'Sötét') + ' · ' + (getAccent(themeAccent)?.name || '');
   $('mAiKeySub').textContent = keyStatusText(ai.configured());
   $('aiState').textContent = ai.configured() ? 'AI-segéd (gép): ellenőrzés…' : 'AI-segéd (gép): nincs beállítva';
   $('menu').showModal();
   if (ai.configured()) { const lf = ai.lastFailure(); ai.status().then((st) => { $('aiState').textContent = 'AI-segéd (gép): ' + st + (lf ? ' · utolsó hiba: ' + lf : ''); }); }
 });
 $('menuClose').addEventListener('click', () => $('menu').close());
+$('mAccount').addEventListener('click', async () => {
+  $('menu').close();
+  if (!FIREBASE_CONFIG) {
+    setStatus('A szinkron még nincs beállítva.');
+    return;
+  }
+  const user = accountSync.getUser();
+  if (user) {
+    try {
+      await accountSync.signOut();
+      updateAccountMenuUi();
+      setStatus('Kijelentkeztél. A listák megmaradtak ezen az eszközön.');
+    } catch {
+      setStatus('A kijelentkezés nem sikerült.');
+    }
+    return;
+  }
+  if (!navigator.onLine) {
+    setStatus('A bejelentkezéshez internetkapcsolat kell.');
+    return;
+  }
+  try {
+    setStatus('Bejelentkezés Google-lel…');
+    await ensureAccountSync();
+    const signedIn = await accountSync.signIn();
+    updateAccountMenuUi();
+    if (signedIn) {
+      setStatus('Bejelentkezve: ' + (signedIn.email || signedIn.displayName || 'Google-fiók'));
+    }
+  } catch (err) {
+    if (err?.code !== 'auth/popup-closed-by-user') {
+      setStatus('A bejelentkezés nem sikerült.');
+    }
+  }
+});
 $('mNewList').addEventListener('click', () => { $('menu').close(); openListDialog(null); });
+function renderThemeDialog() {
+  $('thModeDark').setAttribute('aria-pressed', String(themeMode === 'dark'));
+  $('thModeLight').setAttribute('aria-pressed', String(themeMode === 'light'));
+  renderSwatchGroups($('thSwatches'), themeAccent, themeMode, (id) => {
+    themeAccent = resolveAccentId(id, themeMode);
+    applyTheme();
+    saveTheme();
+    renderThemeDialog();
+    render();
+  });
+}
+$('mTheme').addEventListener('click', () => {
+  $('menu').close();
+  renderThemeDialog();
+  $('themeDialog').showModal();
+});
+for (const btn of [$('thModeDark'), $('thModeLight')]) {
+  btn.addEventListener('click', () => {
+    themeMode = btn.dataset.modePick === 'light' ? 'light' : 'dark';
+    applyTheme();
+    saveTheme();
+    renderThemeDialog();
+    render();
+  });
+}
+$('thClose').addEventListener('click', () => $('themeDialog').close());
 $('mImport').addEventListener('click', () => openImport());
 $('mHistory').addEventListener('click', openHistory);
 function openShoppingPlace() {
@@ -1388,8 +1562,303 @@ function renderKeyBanners() {
   });
 }
 
+// ---- live shared lists (swappable SyncProvider) -----------------------------
+const LS_DEVICE_ID = 'bv.deviceId', LS_SYNC_PENDING = 'bv.syncPending';
+let deviceId = '';
+try { deviceId = localStorage.getItem(LS_DEVICE_ID) || ''; } catch { /* blocked */ }
+if (!deviceId) {
+  deviceId = uid();
+  try { localStorage.setItem(LS_DEVICE_ID, deviceId); } catch { /* blocked */ }
+}
+
+let pendingSync = {};
+try { pendingSync = JSON.parse(localStorage.getItem(LS_SYNC_PENDING) || '{}') || {}; } catch { pendingSync = {}; }
+function savePendingSync() {
+  try { localStorage.setItem(LS_SYNC_PENDING, JSON.stringify(pendingSync)); } catch { /* blocked */ }
+}
+
+let syncProvider = null, syncConnectPromise = null;
+const syncStates = new Map(); // shareId -> 'synced' | 'offline' | 'syncing'
+const syncUnsubs = new Map(); // shareId -> () => void
+const syncFlushTimers = new Map(); // shareId -> timer id
+
+async function ensureSyncProvider() {
+  if (!FIREBASE_CONFIG) return null;
+  if (!syncProvider) syncProvider = createFirebaseProvider();
+  if (!syncConnectPromise) {
+    syncConnectPromise = syncProvider.connect(FIREBASE_CONFIG).catch((err) => {
+      syncConnectPromise = null;
+      throw err;
+    });
+  }
+  await syncConnectPromise;
+  return syncProvider;
+}
+
+function ensurePendingBucket(shareId) {
+  if (!pendingSync[shareId]) pendingSync[shareId] = { upserts: {}, deletes: {} };
+  if (!pendingSync[shareId].upserts) pendingSync[shareId].upserts = {};
+  if (!pendingSync[shareId].deletes) pendingSync[shareId].deletes = {};
+  return pendingSync[shareId];
+}
+
+function findSharedList(listId) {
+  const l = lists.find((x) => x.id === listId);
+  return l && l.shareId ? l : null;
+}
+
+const LS_ACCOUNT_PENDING = 'bv.accountSyncPending';
+const accountSync = createAccountSyncManager({
+  provider: createFirebaseAccountProvider(),
+  deviceId,
+  getState: () => ({ lists, items }),
+  applyState: ({ lists: nextLists, items: nextItems }) => {
+    lists = migrateToLists(nextLists, nextItems);
+    items = nextItems;
+    ensureActiveList();
+    persist();
+    render();
+    kickEnrich();
+  },
+  loadPending: () => {
+    try { return JSON.parse(localStorage.getItem(LS_ACCOUNT_PENDING) || '{}') || {}; } catch { return {}; }
+  },
+  savePending: (p) => {
+    try { localStorage.setItem(LS_ACCOUNT_PENDING, JSON.stringify(p)); } catch { /* blocked */ }
+  },
+  isOnline: () => navigator.onLine && Boolean(FIREBASE_CONFIG),
+  onAuthState: () => {
+    updateAccountMenuUi();
+  },
+  onSharedListAdded: async (l) => {
+    if (!l?.shareId || !FIREBASE_CONFIG || !navigator.onLine) return;
+    try {
+      const prov = await ensureSyncProvider();
+      if (!prov) return;
+      const snapshot = await prov.joinSharedList(l.shareId);
+      const cur = lists.find((x) => x.id === l.id && x.shareId === l.shareId);
+      if (cur) {
+        applyRemoteSnapshot(cur, snapshot);
+        await subscribeSharedList(cur);
+      }
+    } catch { /* offline or unavailable */ }
+  },
+});
+
+let accountConnectPromise = null;
+async function ensureAccountSync() {
+  if (!FIREBASE_CONFIG) return null;
+  if (!accountConnectPromise) {
+    accountConnectPromise = accountSync.connect(FIREBASE_CONFIG).catch((err) => {
+      accountConnectPromise = null;
+      throw err;
+    });
+  }
+  await accountConnectPromise;
+  return accountSync;
+}
+
+function queueItemSync(it) {
+  if (!it || !it.id) return;
+  const now = Date.now();
+  it.updatedAt = now;
+  it.updatedBy = deviceId;
+  const rawList = lists.find((x) => x.id === it.list);
+  accountSync.queueItem(it, rawList);
+  const l = findSharedList(it.list);
+  if (!l) return;
+  const norm = normalizeSharedItem(it, { updatedAt: now, updatedBy: deviceId });
+  if (!norm) return;
+  const bucket = ensurePendingBucket(l.shareId);
+  bucket.upserts[it.id] = norm;
+  delete bucket.deletes[it.id];
+  savePendingSync();
+  scheduleSyncFlush(l.shareId);
+}
+
+function queueDeleteSync(listId, itemId) {
+  if (!itemId) return;
+  const rawList = lists.find((x) => x.id === listId);
+  accountSync.queueItemDelete(listId, itemId, rawList);
+  const l = findSharedList(listId);
+  if (!l) return;
+  const bucket = ensurePendingBucket(l.shareId);
+  bucket.deletes[itemId] = { id: itemId, deletedAt: Date.now(), deletedBy: deviceId };
+  delete bucket.upserts[itemId];
+  savePendingSync();
+  scheduleSyncFlush(l.shareId);
+}
+
+function queueMetaSync(l) {
+  if (!l) return;
+  accountSync.queueListMeta(l);
+  if (!l.shareId) return;
+  const bucket = ensurePendingBucket(l.shareId);
+  bucket.meta = { name: l.name, repeat: l.repeat || 'none', weekday: l.weekday ?? 1, color: l.color || '', updatedAt: Date.now() };
+  savePendingSync();
+  scheduleSyncFlush(l.shareId);
+}
+
+function scheduleSyncFlush(shareId) {
+  if (!navigator.onLine || !FIREBASE_CONFIG) {
+    syncStates.set(shareId, 'offline');
+    return;
+  }
+  clearTimeout(syncFlushTimers.get(shareId));
+  syncFlushTimers.set(shareId, setTimeout(() => { flushPendingSync(shareId); }, 120));
+}
+
+async function flushPendingSync(shareId) {
+  const bucket = pendingSync[shareId];
+  const hasWork = bucket && (bucket.meta || Object.keys(bucket.upserts || {}).length || Object.keys(bucket.deletes || {}).length);
+  if (!hasWork) {
+    syncStates.set(shareId, navigator.onLine && FIREBASE_CONFIG ? 'synced' : 'offline');
+    return;
+  }
+  if (!navigator.onLine || !FIREBASE_CONFIG) {
+    syncStates.set(shareId, 'offline');
+    render();
+    return;
+  }
+  const sentMeta = bucket.meta ? { ...bucket.meta } : null;
+  const sentUpserts = Object.values(bucket.upserts || {});
+  const sentDeletes = Object.values(bucket.deletes || {});
+  syncStates.set(shareId, 'syncing');
+  try {
+    const prov = await ensureSyncProvider();
+    if (!prov) { syncStates.set(shareId, 'offline'); render(); return; }
+    await prov.pushChanges(shareId, {
+      ...(sentMeta ? { meta: sentMeta } : {}),
+      upserts: sentUpserts,
+      deletes: sentDeletes,
+    });
+    const cur = pendingSync[shareId];
+    if (cur) {
+      if (sentMeta && cur.meta?.updatedAt === sentMeta.updatedAt) delete cur.meta;
+      for (const u of sentUpserts) {
+        if (cur.upserts?.[u.id]?.updatedAt === u.updatedAt) delete cur.upserts[u.id];
+      }
+      for (const d of sentDeletes) {
+        if (cur.deletes?.[d.id]?.deletedAt === d.deletedAt) delete cur.deletes[d.id];
+      }
+      if (!cur.meta && !Object.keys(cur.upserts || {}).length && !Object.keys(cur.deletes || {}).length) {
+        delete pendingSync[shareId];
+      }
+      savePendingSync();
+    }
+    syncStates.set(shareId, 'synced');
+  } catch {
+    syncStates.set(shareId, 'offline');
+  }
+  render();
+}
+
+function applyRemoteSnapshot(list, snapshot) {
+  if (!list || !snapshot) return;
+  let changed = false;
+  if (snapshot.meta && typeof snapshot.meta === 'object') {
+    const nextName = typeof snapshot.meta.name === 'string' && snapshot.meta.name.trim()
+      ? snapshot.meta.name.trim().slice(0, 80) : list.name;
+    const nextRepeat = ['none', 'daily', 'weekly'].includes(snapshot.meta.repeat) ? snapshot.meta.repeat : list.repeat;
+    const nextWeekday = Number.isInteger(snapshot.meta.weekday) ? snapshot.meta.weekday : list.weekday;
+    const nextColor = typeof snapshot.meta.color === 'string' && snapshot.meta.color.trim()
+      ? snapshot.meta.color.trim().slice(0, 20)
+      : (snapshot.meta.color === '' ? null : (list.color || null));
+    if (list.name !== nextName || list.repeat !== nextRepeat || list.weekday !== nextWeekday || (list.color || null) !== nextColor) {
+      list.name = nextName;
+      list.repeat = nextRepeat;
+      list.weekday = nextWeekday;
+      list.color = nextColor;
+      changed = true;
+    }
+  }
+
+  const localItems = {};
+  for (const it of Object.values(items)) {
+    if (it && it.list === list.id) {
+      const norm = normalizeSharedItem(it, { updatedAt: it.updatedAt || 0, updatedBy: it.updatedBy || '' });
+      if (norm) localItems[norm.id] = norm;
+    }
+  }
+  const bucket = pendingSync[list.shareId] || {};
+  for (const [id, u] of Object.entries(bucket.upserts || {})) localItems[id] = u;
+  const localTombs = { ...(bucket.deletes || {}) };
+
+  const merged = mergeSharedState(
+    { items: localItems, tombstones: localTombs },
+    { items: snapshot.items || {}, tombstones: snapshot.tombstones || {} },
+  );
+
+  for (const [id, win] of Object.entries(merged.items)) {
+    const existing = items[id];
+    if (existing) {
+      const same = existing.hu === win.hu && existing.de === win.de && (existing.qty || '') === win.qty &&
+        (existing.brand || '') === win.brand && (existing.group || 'kell') === win.group &&
+        normalizeCount(existing.count) === win.count && Boolean(existing.done) === win.done &&
+        (existing.order || 0) === win.order && (existing.updatedAt || 0) === win.updatedAt &&
+        (existing.updatedBy || '') === win.updatedBy && existing.list === list.id;
+      if (!same) {
+        Object.assign(existing, win, { list: list.id });
+        changed = true;
+      }
+    } else {
+      items[id] = { ...win, list: list.id, offerPlace: placeKey(shoppingPlace) };
+      changed = true;
+    }
+  }
+  for (const [id, it] of Object.entries(items)) {
+    if (it && it.list === list.id && !merged.items[id]) {
+      delete items[id];
+      changed = true;
+    }
+  }
+
+  syncStates.set(list.shareId, navigator.onLine ? 'synced' : 'offline');
+  if (changed) {
+    persist();
+    render();
+    kickEnrich();
+  } else {
+    render();
+  }
+}
+
+async function subscribeSharedList(list) {
+  if (!list || !list.shareId || !FIREBASE_CONFIG || !navigator.onLine) return;
+  if (syncUnsubs.has(list.shareId)) return;
+  try {
+    const prov = await ensureSyncProvider();
+    if (!prov) return;
+    const unsub = await prov.subscribe(list.shareId, (snapshot) => {
+      const cur = lists.find((x) => x.id === list.id && x.shareId === list.shareId);
+      if (cur) applyRemoteSnapshot(cur, snapshot);
+    });
+    syncUnsubs.set(list.shareId, unsub);
+    await flushPendingSync(list.shareId);
+  } catch {
+    syncStates.set(list.shareId, 'offline');
+  }
+}
+
+async function initSharedLists() {
+  if (!FIREBASE_CONFIG || !navigator.onLine) return;
+  for (const l of lists) {
+    if (l.shareId) await subscribeSharedList(l);
+  }
+}
+
+async function shareLiveLink(l) {
+  const link = location.href.split('#')[0] + '#join=' + l.shareId;
+  if (navigator.share) {
+    try { await navigator.share({ title: l.name + ' (közös lista)', text: l.name + ' – közös bevásárlólista', url: link }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const ok = await copyText(link);
+  setStatus(ok ? 'Közös lista link másolva a vágólapra.' : 'A link másolása nem sikerült.');
+}
+
 // ---- multiple lists (create / edit / send / delete / incoming #list=) -------
-let menuListId = null, editingListId = null, pendingShareList = null;
+let menuListId = null, editingListId = null, pendingShareList = null, pendingJoinShare = null;
 
 function openListMenu(listId) {
   const l = lists.find((x) => x.id === listId);
@@ -1398,10 +1867,76 @@ function openListMenu(listId) {
   $('lmTitle').textContent = l.name;
   const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
   const hasDone = visible().some((i) => (i.list || fallbackId) === l.id && i.done);
+  $('lmShareLiveSub').textContent = !FIREBASE_CONFIG
+    ? 'A közös lista még nincs beállítva'
+    : l.shareId
+      ? 'meghívó link megosztása'
+      : 'valós idejű szinkron másik telefonnal';
+  $('lmLeaveLive').hidden = !l.shareId;
   $('lmClearDone').hidden = !hasDone;
   $('lmDelete').hidden = lists.length < 2;
   $('listMenu').showModal();
 }
+$('lmShareLive').addEventListener('click', async () => {
+  const l = lists.find((x) => x.id === menuListId);
+  $('listMenu').close();
+  if (!l) return;
+  if (!FIREBASE_CONFIG) {
+    setStatus('A közös lista még nincs beállítva');
+    return;
+  }
+  if (l.shareId) {
+    await shareLiveLink(l);
+    return;
+  }
+  if (!navigator.onLine) {
+    setStatus('A közös lista létrehozásához internetkapcsolat kell.');
+    return;
+  }
+  try {
+    setStatus('Közös lista létrehozása…');
+    const prov = await ensureSyncProvider();
+    const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
+    const now = Date.now();
+    const listItems = visible().filter((i) => (i.list || fallbackId) === l.id).map((it) => {
+      it.updatedAt = it.updatedAt || now;
+      it.updatedBy = it.updatedBy || deviceId;
+      return normalizeSharedItem(it, { updatedAt: now, updatedBy: deviceId });
+    }).filter(Boolean);
+    const { shareId } = await prov.createSharedList({ name: l.name, repeat: l.repeat, weekday: l.weekday, color: l.color || '', createdAt: now }, listItems);
+    l.shareId = shareId;
+    syncStates.set(shareId, 'synced');
+    accountSync.queueListMeta(l);
+    persist();
+    render();
+    await subscribeSharedList(l);
+    await shareLiveLink(l);
+  } catch {
+    setStatus('A közös lista létrehozása nem sikerült.');
+  }
+});
+$('lmLeaveLive').addEventListener('click', async () => {
+  const l = lists.find((x) => x.id === menuListId);
+  $('listMenu').close();
+  if (!l || !l.shareId) return;
+  const sid = l.shareId;
+  const unsub = syncUnsubs.get(sid);
+  if (unsub) { unsub(); syncUnsubs.delete(sid); }
+  clearTimeout(syncFlushTimers.get(sid));
+  syncFlushTimers.delete(sid);
+  syncStates.delete(sid);
+  delete pendingSync[sid];
+  savePendingSync();
+  delete l.shareId;
+  accountSync.queueListMeta(l);
+  for (const it of Object.values(items)) {
+    if (it && it.list === l.id) accountSync.queueItem(it, l);
+  }
+  persist();
+  render();
+  if (syncProvider) { try { await syncProvider.leave(sid); } catch { /* ignore */ } }
+  setStatus('Kiléptél a közös listából.');
+});
 $('lmClose').addEventListener('click', () => $('listMenu').close());
 $('lmEdit').addEventListener('click', () => { $('listMenu').close(); openListDialog(menuListId); });
 $('lmClearDone').addEventListener('click', () => {
@@ -1420,6 +1955,7 @@ $('lmDelete').addEventListener('click', () => {
   for (const it of Object.values(items)) {
     if (it.list === removed.id) remove(it.id);
   }
+  accountSync.queueListDelete(removed.id);
   if (lists.length === 1) {
     lists[0].collapsed = false;
     activeListId = lists[0].id;
@@ -1444,6 +1980,19 @@ $('lmSend').addEventListener('click', async () => {
   setStatus(ok ? 'Megosztási link másolva a vágólapra.' : 'A link másolása nem sikerült.');
 });
 
+let selectedListColor = null;
+function renderListColorPicker() {
+  $('ldColorDefault').setAttribute('aria-pressed', String(!selectedListColor));
+  renderSwatchGroups($('ldColorSwatches'), selectedListColor, themeMode, (id) => {
+    selectedListColor = id;
+    renderListColorPicker();
+  });
+}
+$('ldColorDefault').addEventListener('click', () => {
+  selectedListColor = null;
+  renderListColorPicker();
+});
+
 function syncRepeatDayVisibility() {
   $('ldDayWrap').hidden = $('ldRepeat').value !== 'weekly';
 }
@@ -1455,6 +2004,8 @@ function openListDialog(listId) {
   $('ldName').value = l ? l.name : '';
   $('ldRepeat').value = l ? (l.repeat || 'none') : 'none';
   $('ldWeekday').value = String(l && Number.isInteger(l.weekday) ? l.weekday : 1);
+  selectedListColor = l?.color || null;
+  renderListColorPicker();
   syncRepeatDayVisibility();
   $('listDialog').showModal();
   $('ldName').focus();
@@ -1473,7 +2024,9 @@ $('ldForm').addEventListener('submit', (e) => {
       l.name = name;
       l.repeat = repeat;
       l.weekday = weekday;
+      l.color = selectedListColor || null;
       if (repeat !== 'none' && (wasNone || !l.lastReset)) l.lastReset = Date.now();
+      queueMetaSync(l);
     }
     $('listDialog').close();
     persist(); render();
@@ -1486,8 +2039,10 @@ $('ldForm').addEventListener('submit', (e) => {
       repeat,
       weekday,
       lastReset: repeat !== 'none' ? Date.now() : 0,
+      color: selectedListColor || null,
     });
     lists.push(nl);
+    accountSync.queueListMeta(nl);
     $('listDialog').close();
     focusList(nl.id);
     setStatus('Új lista létrehozva: ' + name);
@@ -1501,7 +2056,8 @@ $('scShareYes').addEventListener('click', () => {
   $('shareConfirm').close();
   if (!data) return;
   const nl = normalizeList({ id: uid(), name: data.name, collapsed: false, repeat: 'none', weekday: 1, lastReset: 0 });
-  lists.push(nl);
+  lists = addIncomingList(lists, items, nl).lists;
+  accountSync.queueListMeta(nl);
   const baseOrder = Date.now();
   data.items.forEach((raw, idx) => {
     const id = uid();
@@ -1518,15 +2074,81 @@ $('scShareYes').addEventListener('click', () => {
       order: baseOrder + idx,
       offerPlace: placeKey(shoppingPlace),
     });
+    accountSync.queueItem(items[id], nl);
   });
   focusList(nl.id);
   kickEnrich();
   setStatus('Lista hozzáadva: ' + nl.name + ' (' + data.items.length + ' tétel)');
 });
 
+$('jcNo').addEventListener('click', () => { pendingJoinShare = null; $('joinConfirm').close(); });
+$('jcYes').addEventListener('click', async () => {
+  const pending = pendingJoinShare;
+  pendingJoinShare = null;
+  $('joinConfirm').close();
+  if (!pending) return;
+  const { shareId, snapshot } = pending;
+  const existing = lists.find((x) => x.shareId === shareId);
+  if (existing) {
+    applyRemoteSnapshot(existing, snapshot);
+    focusList(existing.id);
+    await subscribeSharedList(existing);
+    return;
+  }
+  const meta = snapshot.meta || {};
+  const nl = normalizeList({
+    id: uid(),
+    name: meta.name || DEFAULT_LIST_NAME,
+    collapsed: false,
+    repeat: meta.repeat || 'none',
+    weekday: Number.isInteger(meta.weekday) ? meta.weekday : 1,
+    lastReset: 0,
+    color: typeof meta.color === 'string' && meta.color.trim() ? meta.color.trim().slice(0, 20) : null,
+    shareId,
+  });
+  lists = addIncomingList(lists, items, nl).lists;
+  accountSync.queueListMeta(nl);
+  applyRemoteSnapshot(nl, snapshot);
+  focusList(nl.id);
+  await subscribeSharedList(nl);
+  setStatus('Csatlakoztál a közös listához: ' + nl.name);
+});
+
 // An import link carries the list in the URL fragment (#import=<base64url JSON> or #list=<base64url JSON>).
 // The fragment never leaves the phone: browsers do not send it to the web host.
 function hashImport() {
+  if (/^#join=/i.test(location.hash)) {
+    const shareId = location.hash.slice(6).trim();
+    history.replaceState(null, '', location.pathname + location.search);
+    if (!isValidShareId(shareId)) {
+      setStatus('A közös lista linkje hibás.');
+      return;
+    }
+    const existing = lists.find((x) => x.shareId === shareId);
+    if (existing) {
+      focusList(existing.id);
+      setStatus('Ez a közös lista már megvan: ' + existing.name);
+      return;
+    }
+    if (!FIREBASE_CONFIG) {
+      setStatus('A közös lista még nincs beállítva');
+      return;
+    }
+    (async () => {
+      try {
+        setStatus('Közös lista betöltése…');
+        const prov = await ensureSyncProvider();
+        const snapshot = await prov.joinSharedList(shareId);
+        pendingJoinShare = { shareId, snapshot };
+        const name = snapshot.meta?.name || DEFAULT_LIST_NAME;
+        $('jcMsg').textContent = name + ' közös lista. Csatlakozol?';
+        $('joinConfirm').showModal();
+      } catch {
+        setStatus('A közös lista nem található vagy nincs net.');
+      }
+    })();
+    return;
+  }
   if (/^#ai=/i.test(location.hash)) {
     const parsed = parseAiInput(location.hash);
     if (parsed) {
@@ -1573,12 +2195,19 @@ let statusTimer;
 function setStatus(t) { $('status').textContent = t || ''; clearTimeout(statusTimer); statusTimer = setTimeout(() => ($('status').textContent = ''), 6000); }
 
 // ---- lifecycle ------------------------------------------------------------------
-window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); kickEnrich(); kickRecognize(); kickOffers(); });
-window.addEventListener('offline', setNet);
+window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); initSharedLists(); ensureAccountSync().then((m) => m?.handleOnline()).catch(() => {}); kickEnrich(); kickRecognize(); kickOffers(); });
+window.addEventListener('offline', () => { setNet(); for (const l of lists) if (l.shareId) syncStates.set(l.shareId, 'offline'); render(); });
 window.addEventListener('hashchange', hashImport); // import link opened while the app is already open
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
-    if (applyListResets(lists, items).changed) { persist(); render(); }
+    const res = applyListResets(lists, items);
+    if (res.changed) {
+      for (const lid of res.resetListIds) {
+        const l = findSharedList(lid);
+        if (l) for (const it of Object.values(items)) if (it && it.list === lid) queueItemSync(it);
+      }
+      persist(); render();
+    }
     kickEnrich(); kickRecognize(); kickOffers();
   }
 });
@@ -1604,10 +2233,11 @@ function review(force = false) {
 }
 setInterval(() => { if (!document.hidden) review(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) review(); });
-render(); setNet(); hashImport(); renderKeyBanners();
-if (!settings && !$("importer").open && !$('shareConfirm').open) openShoppingPlace();
+render(); setNet(); hashImport(); renderKeyBanners(); initSharedLists(); if (FIREBASE_CONFIG && navigator.onLine) ensureAccountSync().catch(() => {});
+if (!settings && !$("importer").open && !$('shareConfirm').open && !$('joinConfirm').open) openShoppingPlace();
 // A shared list arriving on a fresh phone asks first; the place question follows once it is answered.
 $('shareConfirm').addEventListener('close', () => { if (!settings) openShoppingPlace(); });
+$('joinConfirm').addEventListener('close', () => { if (!settings) openShoppingPlace(); });
 loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); review(true); });
 
 if ('serviceWorker' in navigator) {
@@ -1617,7 +2247,7 @@ if ('serviceWorker' in navigator) {
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloaded) return;
-    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('shareConfirm').open) return; // never lose an open form
+    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('themeDialog').open || $('shareConfirm').open || $('joinConfirm').open) return; // never lose an open form
     reloaded = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(() => {});
