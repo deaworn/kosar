@@ -54,6 +54,7 @@ export function normalizeSharedItem(raw, fallback = {}) {
     de: cleanStr(raw.de, 120),
     qty: cleanStr(raw.qty, 40),
     brand: cleanStr(raw.brand, 60),
+    type: cleanStr(raw.type, 80),
     group: VALID_GROUPS.has(raw.group) ? raw.group : 'kell',
     count: clampCount(raw.count),
     done: Boolean(raw.done),

@@ -23,6 +23,9 @@ import { createFirebaseProvider } from './sync/firebase-provider.js';
 import { createAccountSyncManager, createFirebaseAccountProvider } from './sync/account-sync.js';
 import { isValidShareId } from './sync/provider.js';
 import { mergeSharedState, normalizeSharedItem } from './sync/merge.js';
+import { WORD_EXCLUSIONS, candidatesToProducts, foldHu, groupProductsByBrand, matchCatalogProducts } from './brand-chooser.js';
+import { reorderOrMoveItem } from './drag-order.js';
+import { parseDeepLink, buildDeepLink, stripDeepLinkFromUrl } from './deep-link.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -468,7 +471,8 @@ function rowHtml(it) {
     // Without a Hungarian name (e.g. a scanned product) the German name is the title.
     '<span class="names"><div class="hu">' + (it.hu || it.de ? esc(it.hu || it.de) + autoTag(it.hu ? 'hu' : 'de')
       : it.recog === 'failed' ? '<span class="est">Nem ismertem fel: koppints, írd be</span>' : '<span class="est">Felismerésre vár…</span>') + g + '</div>' +
-    (it.hu && it.de ? '<div class="de">' + esc(it.de) + autoTag('de') + '</div>' : '') + metaHtml(it) + '</span>' +
+    (it.hu && it.de ? '<div class="de">' + esc(it.de) + autoTag('de') + '</div>' : '') +
+    (it.type ? '<div class="itype">' + esc(it.type) + '</div>' : '') + metaHtml(it) + '</span>' +
     (qtyText ? '<span class="qty">' + esc(qtyText) + '</span>' : '') + '</button>' +
     '<div class="stepper" role="group" aria-label="Darabszám">' +
     '<button type="button" class="step-btn" data-act="dec" aria-label="Kevesebb"' + (count <= 1 ? ' disabled' : '') + '>−</button>' +
@@ -590,7 +594,9 @@ function render() {
   $('storeWarn').hidden = storageOk;
 }
 
+let justDraggedAt = 0;
 $('list').addEventListener('click', (ev) => {
+  if (Date.now() - justDraggedAt < 250) return;
   const lbtn = ev.target.closest('[data-list-act]');
   if (lbtn) {
     const act = lbtn.dataset.listAct;
@@ -621,8 +627,305 @@ $('list').addEventListener('click', (ev) => {
       persist(); render();
       setStatus('Kiválasztva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
     }
-  } else openEditor(id);
+  } else openBrandSheet(id);
 });
+
+// ---- long-press drag reorder & cross-list move ------------------------------
+const LONG_PRESS_MS = 400;
+const DRAG_MOVE_SLOP = 8;
+let dragSession = null;
+let dragScrollRaf = 0;
+
+function clearDragIndicators() {
+  for (const el of document.querySelectorAll('#list .drag-over-top, #list .drag-over-bot, #list .drag-target')) {
+    el.classList.remove('drag-over-top', 'drag-over-bot', 'drag-target');
+  }
+}
+
+function updateDragTarget(clientX, clientY) {
+  if (!dragSession || !dragSession.active) return;
+  clearDragIndicators();
+  const el = document.elementFromPoint(clientX, clientY);
+  const card = el?.closest?.('#list .lcard[data-list-id]');
+  if (!card) {
+    dragSession.targetListId = null;
+    dragSession.targetIndex = 0;
+    return;
+  }
+  const lid = card.dataset.listId;
+  dragSession.targetListId = lid;
+  if (card.classList.contains('collapsed')) {
+    card.classList.add('drag-target');
+    const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
+    dragSession.targetIndex = visible().filter((i) => (i.list || fallbackId) === lid && i.id !== dragSession.id).length;
+    return;
+  }
+  const lis = [...card.querySelectorAll('.lcard-items li[data-id]')].filter((x) => x.dataset.id !== dragSession.id);
+  if (!lis.length) {
+    card.classList.add('drag-target');
+    dragSession.targetIndex = 0;
+    return;
+  }
+  let idx = lis.length;
+  for (let i = 0; i < lis.length; i++) {
+    const rect = lis[i].getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      idx = i;
+      lis[i].classList.add('drag-over-top');
+      break;
+    }
+  }
+  if (idx === lis.length) lis[lis.length - 1].classList.add('drag-over-bot');
+  dragSession.targetIndex = idx;
+}
+
+function stepDragAutoScroll() {
+  if (!dragSession || !dragSession.active) { dragScrollRaf = 0; return; }
+  const y = dragSession.lastY;
+  const vh = window.innerHeight;
+  const edge = 72;
+  let dy = 0;
+  if (y < edge) dy = -Math.ceil(((edge - y) / edge) * 14);
+  else if (y > vh - edge) dy = Math.ceil(((y - (vh - edge)) / edge) * 14);
+  if (dy !== 0) {
+    window.scrollBy(0, dy);
+    updateDragTarget(dragSession.lastX, dragSession.lastY);
+  }
+  dragScrollRaf = requestAnimationFrame(stepDragAutoScroll);
+}
+
+function endDragSession(commit) {
+  if (!dragSession) return;
+  const s = dragSession;
+  dragSession = null;
+  clearTimeout(s.timer);
+  if (dragScrollRaf) { cancelAnimationFrame(dragScrollRaf); dragScrollRaf = 0; }
+  document.body.classList.remove('dragging');
+  clearDragIndicators();
+  if (s.ghost) s.ghost.remove();
+  if (s.li) s.li.classList.remove('drag-src');
+  if (!s.active) return;
+
+  justDraggedAt = Date.now();
+  if (commit && s.targetListId) {
+    const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
+    const res = reorderOrMoveItem(items, s.id, s.targetListId, s.targetIndex, fallbackId);
+    if (res.changedIds.length) {
+      if (res.prevListId !== res.nextListId) queueDeleteSync(res.prevListId, s.id);
+      for (const cid of res.changedIds) {
+        if (items[cid]) queueItemSync(items[cid]);
+      }
+      persist();
+      render();
+      if (res.prevListId !== res.nextListId) {
+        const targetList = lists.find((x) => x.id === res.nextListId);
+        setStatus('Áthelyezve: ' + (targetList?.name || ''));
+      }
+    }
+  }
+}
+
+$('list').addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0 || anyOpen() || dragSession) return;
+  if (ev.target.closest('.chk, .stepper, .icobtn, .chooser, .lcard-head, .lcard-new')) return;
+  const li = ev.target.closest('.lcard-items li[data-id]');
+  if (!li || !items[li.dataset.id]) return;
+  const rect = li.getBoundingClientRect();
+  const s = {
+    id: li.dataset.id,
+    li,
+    pointerId: ev.pointerId,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    lastX: ev.clientX,
+    lastY: ev.clientY,
+    offsetY: ev.clientY - rect.top,
+    left: rect.left,
+    width: rect.width,
+    active: false,
+    ghost: null,
+    targetListId: null,
+    targetIndex: 0,
+    timer: null,
+  };
+  s.timer = setTimeout(() => {
+    if (dragSession !== s) return;
+    s.active = true;
+    pullY = null; pullD = 0;
+    try { navigator.vibrate?.(15); } catch { /* ignore */ }
+    document.body.classList.add('dragging');
+    const ghost = li.cloneNode(true);
+    ghost.className = 'drag-ghost';
+    ghost.style.left = s.left + 'px';
+    ghost.style.width = s.width + 'px';
+    ghost.style.top = (s.lastY - s.offsetY) + 'px';
+    document.body.appendChild(ghost);
+    s.ghost = ghost;
+    li.classList.add('drag-src');
+    updateDragTarget(s.lastX, s.lastY);
+    dragScrollRaf = requestAnimationFrame(stepDragAutoScroll);
+  }, LONG_PRESS_MS);
+  dragSession = s;
+});
+
+window.addEventListener('pointermove', (ev) => {
+  if (!dragSession || ev.pointerId !== dragSession.pointerId) return;
+  dragSession.lastX = ev.clientX;
+  dragSession.lastY = ev.clientY;
+  if (!dragSession.active) {
+    if (Math.hypot(ev.clientX - dragSession.startX, ev.clientY - dragSession.startY) > DRAG_MOVE_SLOP) {
+      endDragSession(false);
+    }
+    return;
+  }
+  if (dragSession.ghost) {
+    dragSession.ghost.style.top = (ev.clientY - dragSession.offsetY) + 'px';
+  }
+  updateDragTarget(ev.clientX, ev.clientY);
+});
+
+window.addEventListener('touchmove', (ev) => {
+  if (dragSession?.active) ev.preventDefault();
+}, { passive: false });
+
+window.addEventListener('pointerup', (ev) => {
+  if (!dragSession || ev.pointerId !== dragSession.pointerId) return;
+  endDragSession(true);
+});
+
+window.addEventListener('pointercancel', (ev) => {
+  if (!dragSession || ev.pointerId !== dragSession.pointerId) return;
+  endDragSession(false);
+});
+
+// ---- brand -> type bottom sheet ---------------------------------------------
+let brandSheetId = null;
+let brandSheetMore = false;
+let brandSheetCustom = false;
+const BRAND_CHIP_LIMIT = 12;
+
+function getBrandSheetGroups(it) {
+  if (shoppingPlace.country === 'hu') {
+    const products = matchCatalogProducts(huCatalog, it.hu || it.de || '', WORD_EXCLUSIONS);
+    return groupProductsByBrand(products);
+  }
+  const products = candidatesToProducts(it, activeCandidates(it));
+  return groupProductsByBrand(products);
+}
+
+function renderBrandSheet() {
+  const it = brandSheetId ? items[brandSheetId] : null;
+  if (!it) return;
+  $('bsTitle').textContent = (it.hu || it.de || 'Tétel') + ' – márka és típus';
+
+  const groups = getBrandSheetGroups(it);
+  const visibleGroups = brandSheetMore ? groups : groups.slice(0, BRAND_CHIP_LIMIT);
+  const hasMore = !brandSheetMore && groups.length > BRAND_CHIP_LIMIT;
+  const curBrandFold = foldHu(it.brand || '');
+
+  let brandHtml = '<button type="button" class="bs-chip" data-bs-brand="" aria-pressed="' + (!curBrandFold) + '">Bármelyik márka</button>';
+  brandHtml += visibleGroups.map((g) => {
+    const sel = curBrandFold && foldHu(g.brand) === curBrandFold;
+    return '<button type="button" class="bs-chip" data-bs-brand="' + esc(g.brand) + '" aria-pressed="' + sel + '">' + esc(g.brand) + '</button>';
+  }).join('');
+  if (curBrandFold && !visibleGroups.some((g) => foldHu(g.brand) === curBrandFold)) {
+    brandHtml += '<button type="button" class="bs-chip" data-bs-brand="' + esc(it.brand) + '" aria-pressed="true">' + esc(it.brand) + '</button>';
+  }
+  if (hasMore) {
+    brandHtml += '<button type="button" class="bs-chip" data-bs-more="1">Több…</button>';
+  }
+  $('bsBrands').innerHTML = brandHtml;
+
+  const selGroup = curBrandFold ? groups.find((g) => foldHu(g.brand) === curBrandFold) : null;
+  const showTypes = Boolean(curBrandFold || brandSheetCustom);
+  $('bsTypeSec').hidden = !showTypes;
+  if (showTypes) {
+    const types = selGroup ? selGroup.types : [];
+    const curTypeFold = foldHu(it.type || '');
+    let typeHtml = types.map((t, i) => {
+      const sel = curTypeFold && foldHu(t.label) === curTypeFold;
+      const text = t.quantity ? t.label + ' · ' + t.quantity : t.label;
+      return '<button type="button" class="bs-chip" data-bs-type-idx="' + i + '" aria-pressed="' + sel + '">' + esc(text) + '</button>';
+    }).join('');
+    typeHtml += '<button type="button" class="bs-chip" data-bs-custom="1" aria-pressed="' + brandSheetCustom + '">Nincs a listában</button>';
+    $('bsTypes').innerHTML = typeHtml;
+  }
+  $('bsCustomForm').hidden = !brandSheetCustom;
+}
+
+function openBrandSheet(id) {
+  const it = items[id];
+  if (!it) return;
+  brandSheetId = id;
+  brandSheetMore = false;
+  brandSheetCustom = false;
+  if (shoppingPlace.country === 'hu' && !huCatalog.length) {
+    void loadHuCatalog().then(() => {
+      if ($('brandSheet').open && brandSheetId === id) renderBrandSheet();
+    });
+  }
+  renderBrandSheet();
+  $('brandSheet').showModal();
+}
+
+$('bsBrands').addEventListener('click', (ev) => {
+  const more = ev.target.closest('button[data-bs-more]');
+  if (more) { brandSheetMore = true; renderBrandSheet(); return; }
+  const btn = ev.target.closest('button[data-bs-brand]');
+  if (!btn || !brandSheetId || !items[brandSheetId]) return;
+  const brand = btn.dataset.bsBrand;
+  brandSheetCustom = false;
+  if (!brand) {
+    edit(brandSheetId, { brand: '', type: '' });
+  } else {
+    edit(brandSheetId, { brand });
+  }
+  renderBrandSheet();
+});
+
+$('bsTypes').addEventListener('click', (ev) => {
+  const customBtn = ev.target.closest('button[data-bs-custom]');
+  if (customBtn) {
+    brandSheetCustom = true;
+    $('bsCustomForm').hidden = false;
+    $('bsCustomInput').value = items[brandSheetId]?.type || '';
+    $('bsCustomInput').focus();
+    return;
+  }
+  const btn = ev.target.closest('button[data-bs-type-idx]');
+  if (!btn || !brandSheetId || !items[brandSheetId]) return;
+  const it = items[brandSheetId];
+  const groups = getBrandSheetGroups(it);
+  const selGroup = groups.find((g) => foldHu(g.brand) === foldHu(it.brand || ''));
+  const t = selGroup?.types?.[Number(btn.dataset.bsTypeIdx)];
+  if (!t) return;
+  const patch = {
+    brand: selGroup.brand,
+    type: t.label.slice(0, 80),
+  };
+  if (t.gtin) patch.barcode = t.gtin;
+  if (!it.qty && t.quantity) patch.qty = t.quantity.slice(0, 40);
+  edit(brandSheetId, patch);
+  $('brandSheet').close();
+  setStatus('Kiválasztva: ' + [patch.brand, patch.type].filter(Boolean).join(' · '));
+});
+
+$('bsCustomForm').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  if (!brandSheetId || !items[brandSheetId]) return;
+  const txt = $('bsCustomInput').value.trim().slice(0, 80);
+  if (!txt) { $('bsCustomInput').focus(); return; }
+  edit(brandSheetId, { type: txt });
+  $('brandSheet').close();
+  setStatus('Mentve: ' + txt);
+});
+
+$('bsFullEdit').addEventListener('click', () => {
+  const id = brandSheetId;
+  $('brandSheet').close();
+  if (id) openEditor(id);
+});
+$('bsClose').addEventListener('click', () => $('brandSheet').close());
 
 // ---- zoom (full screen picture; closes on tap or the back button) ----------------
 function openZoom(p) {
@@ -670,18 +973,11 @@ async function loadHuCatalog() {
   return huCatalogLoad;
 }
 let lookupHuCatalog = () => [];
-let milkChooserOpen = false;
-const isMilkQuery = () => shoppingPlace.country === 'hu' && $('inName').value.trim().toLowerCase() === 'tej';
-const milkProducts = () => lookupHuCatalog(huCatalog.filter(({ normalizedName }) =>
-  /(?:^| )tej(?: |$)/.test(normalizedName) &&
-  !/(?:^| )(?:kokusz|szoja|zab|mandula|rizs|novenyi|por|suritett|kakao|csokis|vanilias|izesitett|gumimaci)(?: |$)/.test(normalizedName)), 'tej', 'hu');
 function renderSuggest() {
   const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
   if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
   const hits = ownItemTips(q, items, hist);
-  const tips = dictionaryTips(q, shoppingPlace.country);
-  const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
   const histHtml = hits.map(({ id, item: h, inList }) => {
     const variant = chosenVariant(h)?.name;
     const label = inList && !h.done ? 'A list\u00e1n' : 'Kor\u00e1bbi';
@@ -690,6 +986,14 @@ function renderSuggest() {
       + esc([h.de && h.hu ? h.de : '', h.brand, variant && shortName(variant, h.brand)].filter(Boolean).join(' \u00b7 '))
       + '</span><i>' + label + '</i></button>';
   }).join('');
+  if (shoppingPlace.country === 'hu' && q === 'tej') {
+    const plainMilkHtml = '<button type="button" class="sug" data-plain-hu="Tej" data-plain-icon="milk"><b>Tej</b><span>márka és típus a listán választható</span></button>';
+    box.innerHTML = plainMilkHtml + histHtml;
+    box.hidden = false;
+    return;
+  }
+  const tips = dictionaryTips(q, shoppingPlace.country);
+  const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
   const st = typingCands.getState();
   const match = q.length >= 3 && st.text.toLowerCase() === q;
   const cands = match ? st.candidates : [];
@@ -722,6 +1026,16 @@ function suggest() {
 }
 $('inName').addEventListener('input', suggest);
 $('suggest').addEventListener('click', (ev) => {
+  const plain = ev.target.closest('button[data-plain-hu]');
+  if (plain) {
+    const id = uid();
+    edit(id, { hu: plain.dataset.plainHu, de: '', icon: plain.dataset.plainIcon || 'bag', qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
+    $('inName').value = '';
+    typingCands.clear();
+    reveal(id);
+    $('inName').focus();
+    return;
+  }
   const product = ev.target.closest('button[data-off-gtin]');
   if (product) {
     const row = lookupHuCatalog(huCatalog, $('inName').value, shoppingPlace.country)
@@ -800,7 +1114,11 @@ $('addForm').addEventListener('submit', (e) => {
   if (!text) { $('inName').focus(); return; }
   const r = applyBrand({ hu: text, de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
   const lang = guessLang(r.hu);
-  if (lang === 'de') { r.de = r.hu; r.hu = ''; } else if (!lang) r.langCheck = true;
+  if (lang === 'de') { r.de = r.hu; r.hu = ''; }
+  else {
+    if (!lang) r.langCheck = true;
+    r.hu = r.hu.replace(/^\p{Ll}/u, (c) => c.toUpperCase());
+  }
   const nid = uid(); edit(nid, r); reveal(nid);
   $('inName').value = ''; typingCands.clear();
   setStatus('Felírva: ' + (r.hu || r.de) + (r.brand ? ' (márka: ' + r.brand + ')' : '') + (navigator.onLine ? '' : ' (a német név és a fotó netre vár)'));
@@ -1793,7 +2111,7 @@ function applyRemoteSnapshot(list, snapshot) {
     const existing = items[id];
     if (existing) {
       const same = existing.hu === win.hu && existing.de === win.de && (existing.qty || '') === win.qty &&
-        (existing.brand || '') === win.brand && (existing.group || 'kell') === win.group &&
+        (existing.brand || '') === win.brand && (existing.type || '') === win.type && (existing.group || 'kell') === win.group &&
         normalizeCount(existing.count) === win.count && Boolean(existing.done) === win.done &&
         (existing.order || 0) === win.order && (existing.updatedAt || 0) === win.updatedAt &&
         (existing.updatedBy || '') === win.updatedBy && existing.list === list.id;
@@ -1848,7 +2166,7 @@ async function initSharedLists() {
 }
 
 async function shareLiveLink(l) {
-  const link = location.href.split('#')[0] + '#join=' + l.shareId;
+  const link = buildDeepLink(location.href, 'join', l.shareId);
   if (navigator.share) {
     try { await navigator.share({ title: l.name + ' (közös lista)', text: l.name + ' – közös bevásárlólista', url: link }); return; }
     catch (e) { if (e.name === 'AbortError') return; }
@@ -2114,12 +2432,15 @@ $('jcYes').addEventListener('click', async () => {
   setStatus('Csatlakoztál a közös listához: ' + nl.name);
 });
 
-// An import link carries the list in the URL fragment (#import=<base64url JSON> or #list=<base64url JSON>).
-// The fragment never leaves the phone: browsers do not send it to the web host.
-function hashImport() {
-  if (/^#join=/i.test(location.hash)) {
-    const shareId = location.hash.slice(6).trim();
-    history.replaceState(null, '', location.pathname + location.search);
+// An import/share/join/ai link carries its payload in the query string (?join=, ?list=, ?import=, ?ai=),
+// with legacy URL fragment (#...) support as a fallback for older links.
+function handleDeepLink() {
+  const link = parseDeepLink(location.search, location.hash);
+  if (!link) return;
+  const cleanUrl = stripDeepLinkFromUrl(location.pathname, location.search, location.hash, link);
+  if (link.type === 'join') {
+    const shareId = link.value;
+    history.replaceState(null, '', cleanUrl);
     if (!isValidShareId(shareId)) {
       setStatus('A közös lista linkje hibás.');
       return;
@@ -2149,18 +2470,19 @@ function hashImport() {
     })();
     return;
   }
-  if (/^#ai=/i.test(location.hash)) {
-    const parsed = parseAiInput(location.hash);
+  if (link.type === 'ai') {
+    const parsed = parseAiInput(link.raw);
     if (parsed) {
       if (applyAiKey(parsed, { copyPending: true })) {
-        history.replaceState(null, '', location.pathname + location.search);
+        history.replaceState(null, '', cleanUrl);
       }
       return;
     }
+    return;
   }
-  if (/^#list=/i.test(location.hash)) {
-    const parsed = decodeShareList(location.hash);
-    history.replaceState(null, '', location.pathname + location.search);
+  if (link.type === 'list') {
+    const parsed = decodeShareList(link.raw);
+    history.replaceState(null, '', cleanUrl);
     if (!parsed) {
       setStatus('A megosztott lista linkje hibás vagy túl nagy.');
       return;
@@ -2170,14 +2492,15 @@ function hashImport() {
     $('shareConfirm').showModal();
     return;
   }
-  const m = location.hash.match(/^#import=([A-Za-z0-9_-]+)$/);
-  if (!m) return;
-  history.replaceState(null, '', location.pathname + location.search);
-  try {
-    const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
-    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    openImport(new TextDecoder().decode(bytes), true);
-  } catch { setStatus('Az import-link hibás.'); }
+  if (link.type === 'import') {
+    if (!/^[A-Za-z0-9_-]+$/.test(link.value)) return;
+    history.replaceState(null, '', cleanUrl);
+    try {
+      const b64 = link.value.replace(/-/g, '+').replace(/_/g, '/');
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      openImport(new TextDecoder().decode(bytes), true);
+    } catch { setStatus('Az import-link hibás.'); }
+  }
 }
 
 // Photos shared into the app (Android share sheet -> Kosár) are parked by the
@@ -2197,7 +2520,8 @@ function setStatus(t) { $('status').textContent = t || ''; clearTimeout(statusTi
 // ---- lifecycle ------------------------------------------------------------------
 window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); initSharedLists(); ensureAccountSync().then((m) => m?.handleOnline()).catch(() => {}); kickEnrich(); kickRecognize(); kickOffers(); });
 window.addEventListener('offline', () => { setNet(); for (const l of lists) if (l.shareId) syncStates.set(l.shareId, 'offline'); render(); });
-window.addEventListener('hashchange', hashImport); // import link opened while the app is already open
+window.addEventListener('hashchange', handleDeepLink); // import link opened while the app is already open
+window.addEventListener('popstate', handleDeepLink);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     const res = applyListResets(lists, items);
@@ -2233,7 +2557,7 @@ function review(force = false) {
 }
 setInterval(() => { if (!document.hidden) review(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) review(); });
-render(); setNet(); hashImport(); renderKeyBanners(); initSharedLists(); if (FIREBASE_CONFIG && navigator.onLine) ensureAccountSync().catch(() => {});
+render(); setNet(); handleDeepLink(); renderKeyBanners(); initSharedLists(); if (FIREBASE_CONFIG && navigator.onLine) ensureAccountSync().catch(() => {});
 if (!settings && !$("importer").open && !$('shareConfirm').open && !$('joinConfirm').open) openShoppingPlace();
 // A shared list arriving on a fresh phone asks first; the place question follows once it is answered.
 $('shareConfirm').addEventListener('close', () => { if (!settings) openShoppingPlace(); });
@@ -2247,7 +2571,7 @@ if ('serviceWorker' in navigator) {
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloaded) return;
-    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('themeDialog').open || $('shareConfirm').open || $('joinConfirm').open) return; // never lose an open form
+    if ($('editor').open || $('brandSheet').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('themeDialog').open || $('shareConfirm').open || $('joinConfirm').open) return; // never lose an open form
     reloaded = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(() => {});

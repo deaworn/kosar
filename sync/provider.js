@@ -18,6 +18,7 @@
  * @property {string} [de]
  * @property {string} [qty]
  * @property {string} [brand]
+ * @property {string} [type]
  * @property {'kell'|'havan'|'otthon'} [group]
  * @property {number} [count]
  * @property {boolean} [done]

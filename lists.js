@@ -228,7 +228,7 @@ function fromBase64Url(token) {
 
 /**
  * Encodes a list (name + items: hu, de, qty, brand, group; no photos) into a
- * `#list=<base64url>` hash string (or full URL if `baseUrl` is provided).
+ * `?list=<base64url>` query string (or full URL if `baseUrl` is provided).
  */
 export function encodeShareList(list, listItems = [], baseUrl = '') {
   const name = String(list?.name || DEFAULT_LIST_NAME).trim().slice(0, MAX_LIST_NAME_LEN) || DEFAULT_LIST_NAME;
@@ -254,26 +254,50 @@ export function encodeShareList(list, listItems = [], baseUrl = '') {
   }
   const payload = { v: 1, name, items: compactItems };
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
-  const hash = '#list=' + toBase64Url(bytes);
-  if (!baseUrl) return hash;
-  return String(baseUrl).split('#')[0] + hash;
+  const token = toBase64Url(bytes);
+  if (!baseUrl) {
+    const params = new URLSearchParams();
+    params.set('list', token);
+    return '?' + params.toString();
+  }
+  const u = new URL(String(baseUrl));
+  u.hash = '';
+  u.searchParams.set('list', token);
+  return u.toString();
 }
 
 /**
- * Extracts, validates, and size-limits an incoming `#list=<base64url>` share payload.
- * Returns `{ name, items }` or `null` if malformed, oversized, or invalid.
+ * Extracts, validates, and size-limits an incoming `?list=<base64url>` (or legacy `#list=<base64url>`)
+ * share payload. Returns `{ name, items }` or `null` if malformed, oversized, or invalid.
  */
 export function decodeShareList(rawInput) {
   if (typeof rawInput !== 'string') return null;
   const s = rawInput.trim();
   if (!s) return null;
 
-  const hashIdx = s.indexOf('#');
-  const frag = hashIdx >= 0 ? s.slice(hashIdx + 1) : s;
-  const match = frag.match(/^list=([A-Za-z0-9_-]+)$/);
-  if (!match) return null;
-
-  const token = match[1];
+  let token = null;
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      const u = new URL(s);
+      if (u.searchParams.has('list')) token = u.searchParams.get('list');
+      else if (u.hash) {
+        const m = u.hash.slice(1).match(/^list=([A-Za-z0-9_-]+)$/);
+        if (m) token = m[1];
+      }
+    } catch {
+      return null;
+    }
+  } else if (s.startsWith('?')) {
+    const sp = new URLSearchParams(s);
+    if (sp.has('list')) token = sp.get('list');
+  } else if (s.startsWith('#')) {
+    const m = s.slice(1).match(/^list=([A-Za-z0-9_-]+)$/);
+    if (m) token = m[1];
+  } else {
+    const sp = new URLSearchParams(s);
+    if (sp.has('list')) token = sp.get('list');
+  }
+  if (!token || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
   if (token.length < 4 || token.length > MAX_SHARE_HASH_LEN) return null;
 
   let jsonStr;
