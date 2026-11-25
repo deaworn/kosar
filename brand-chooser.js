@@ -264,3 +264,75 @@ export function groupProductsByBrand(products) {
     }))
     .sort((a, b) => b.count - a.count || a.brand.localeCompare(b.brand, 'hu'));
 }
+
+/**
+ * Searches a product catalog (HU Open Food Facts index or DE/AT candidate products)
+ * by accent-insensitive, whole-word/prefix and mid-string matching.
+ * Ranking order: exact (0) > prefix (1) > word-prefix (2) > contains (3).
+ *
+ * @param {Array<{ gtin?: string, name: string, brand?: string, quantity?: string, normalizedName?: string, tokens?: string[], source?: any }>} catalog
+ * @param {string} query
+ * @param {{ limit?: number }} [options]
+ * @returns {Array<{ gtin: string, name: string, brand: string, quantity: string, label: string, source: any }>}
+ */
+export function searchBrandSheetCatalog(catalog, query, { limit = 30 } = {}) {
+  if (!Array.isArray(catalog) || !catalog.length) return [];
+  const raw = String(query ?? '').trim();
+  const normalized = foldHu(raw);
+  if (!normalized) return [];
+
+  const qWords = normalized.split(' ').filter(Boolean);
+  if (!qWords.length) return [];
+
+  const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 30;
+  const barcode = /^\d{8,14}$/.test(raw) ? raw.padStart(14, '0') : '';
+  const matches = [];
+
+  for (const row of catalog) {
+    if (!row || !row.name) continue;
+    const gtin = String(row.gtin ?? '').trim();
+    const normName = row.normalizedName || foldHu(row.name);
+    const normBrand = foldHu(row.brand || '');
+    const normQty = foldHu(row.quantity || '');
+    const haystack = [normName, normBrand, normQty].filter(Boolean).join(' ');
+    const tokens = Array.isArray(row.tokens) && row.tokens.length
+      ? row.tokens
+      : haystack.split(' ').filter(Boolean);
+    const combined = normBrand && !normName.startsWith(normBrand)
+      ? normBrand + ' ' + normName
+      : normName;
+
+    let rank = -1;
+    if (barcode && gtin === barcode) {
+      rank = 0;
+    } else if (normName === normalized || combined === normalized || normBrand === normalized) {
+      rank = 0;
+    } else if (normName.startsWith(normalized) || combined.startsWith(normalized) || normBrand.startsWith(normalized)) {
+      rank = 1;
+    } else if (qWords.every((w) => tokens.some((t) => t.startsWith(w)))) {
+      rank = 2;
+    } else if (qWords.every((w) => haystack.includes(w))) {
+      rank = 3;
+    }
+
+    if (rank >= 0) matches.push({ row, rank });
+  }
+
+  matches.sort((a, b) =>
+    a.rank - b.rank
+    || a.row.name.length - b.row.name.length
+    || a.row.name.localeCompare(b.row.name, 'hu')
+  );
+
+  return matches.slice(0, cap).map(({ row }) => {
+    const brand = extractPrimaryBrand(row.brand);
+    return {
+      gtin: String(row.gtin ?? '').trim(),
+      name: row.name,
+      brand,
+      quantity: normalizeQuantity(row.quantity),
+      label: normalizeTypeLabel(stripBrandPrefix(row.name, brand)),
+      source: row.source || null,
+    };
+  });
+}

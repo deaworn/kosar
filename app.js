@@ -23,7 +23,7 @@ import { createFirebaseProvider } from './sync/firebase-provider.js';
 import { createAccountSyncManager, createFirebaseAccountProvider } from './sync/account-sync.js';
 import { isValidShareId } from './sync/provider.js';
 import { mergeSharedState, normalizeSharedItem } from './sync/merge.js';
-import { WORD_EXCLUSIONS, candidatesToProducts, foldHu, groupProductsByBrand, matchCatalogProducts } from './brand-chooser.js';
+import { WORD_EXCLUSIONS, candidatesToProducts, foldHu, groupProductsByBrand, matchCatalogProducts, searchBrandSheetCatalog } from './brand-chooser.js';
 import { reorderOrMoveItem } from './drag-order.js';
 import { parseDeepLink, buildDeepLink, stripDeepLinkFromUrl } from './deep-link.js';
 
@@ -802,7 +802,10 @@ window.addEventListener('pointercancel', (ev) => {
 let brandSheetId = null;
 let brandSheetMore = false;
 let brandSheetCustom = false;
+let brandSheetSearchTimer = null;
+let brandSheetSearchResults = [];
 const BRAND_CHIP_LIMIT = 12;
+const BRAND_SEARCH_LIMIT = 30;
 
 function getBrandSheetGroups(it) {
   if (shoppingPlace.country === 'hu') {
@@ -813,10 +816,54 @@ function getBrandSheetGroups(it) {
   return groupProductsByBrand(products);
 }
 
+function applyBrandSheetPick(it, pick) {
+  const patch = {
+    brand: String(pick.brand || '').slice(0, 80),
+    type: String(pick.label || '').slice(0, 80),
+  };
+  if (pick.gtin) patch.barcode = pick.gtin;
+  if (!it.qty && pick.quantity) patch.qty = String(pick.quantity).slice(0, 40);
+  edit(brandSheetId, patch);
+  $('brandSheet').close();
+  setStatus('Kiválasztva: ' + [patch.brand, patch.type].filter(Boolean).join(' · '));
+}
+
 function renderBrandSheet() {
   const it = brandSheetId ? items[brandSheetId] : null;
   if (!it) return;
   $('bsTitle').textContent = (it.hu || it.de || 'Tétel') + ' – márka és típus';
+
+  const query = $('bsSearch').value.trim();
+  if (query) {
+    $('bsTwoStep').hidden = true;
+    $('bsSearchResults').hidden = false;
+    const pool = shoppingPlace.country === 'hu'
+      ? huCatalog
+      : candidatesToProducts(it, activeCandidates(it));
+    const matches = searchBrandSheetCatalog(pool, query, { limit: BRAND_SEARCH_LIMIT + 1 });
+    const hasMore = matches.length > BRAND_SEARCH_LIMIT;
+    brandSheetSearchResults = hasMore ? matches.slice(0, BRAND_SEARCH_LIMIT) : matches;
+    $('bsSearchHint').hidden = !hasMore;
+    if (!brandSheetSearchResults.length) {
+      const msg = shoppingPlace.country === 'hu' && !huCatalog.length
+        ? 'Katalógus betöltése…'
+        : 'Nincs találat';
+      $('bsResults').innerHTML = '<div class="bs-empty">' + msg + '</div>';
+      return;
+    }
+    $('bsResults').innerHTML = brandSheetSearchResults.map((r, i) => {
+      const brandHtml = r.brand ? '<b>' + esc(r.brand) + '</b>' : '';
+      const nameText = r.brand ? (r.label || r.name) : r.name;
+      const qtyHtml = r.quantity ? '<small>' + esc(r.quantity) + '</small>' : '';
+      return '<button type="button" class="bs-result" data-bs-res-idx="' + i + '">' + brandHtml + '<span>' + esc(nameText) + '</span>' + qtyHtml + '</button>';
+    }).join('');
+    return;
+  }
+
+  brandSheetSearchResults = [];
+  $('bsSearchResults').hidden = true;
+  $('bsSearchHint').hidden = true;
+  $('bsTwoStep').hidden = false;
 
   const groups = getBrandSheetGroups(it);
   const visibleGroups = brandSheetMore ? groups : groups.slice(0, BRAND_CHIP_LIMIT);
@@ -859,6 +906,9 @@ function openBrandSheet(id) {
   brandSheetId = id;
   brandSheetMore = false;
   brandSheetCustom = false;
+  clearTimeout(brandSheetSearchTimer);
+  brandSheetSearchResults = [];
+  $('bsSearch').value = '';
   if (shoppingPlace.country === 'hu' && !huCatalog.length) {
     void loadHuCatalog().then(() => {
       if ($('brandSheet').open && brandSheetId === id) renderBrandSheet();
@@ -867,6 +917,26 @@ function openBrandSheet(id) {
   renderBrandSheet();
   $('brandSheet').showModal();
 }
+
+$('bsSearch').addEventListener('input', () => {
+  clearTimeout(brandSheetSearchTimer);
+  brandSheetSearchTimer = setTimeout(() => {
+    if ($('brandSheet').open) renderBrandSheet();
+  }, 120);
+});
+
+$('bsSearch').addEventListener('search', () => {
+  clearTimeout(brandSheetSearchTimer);
+  if ($('brandSheet').open) renderBrandSheet();
+});
+
+$('bsResults').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-bs-res-idx]');
+  if (!btn || !brandSheetId || !items[brandSheetId]) return;
+  const hit = brandSheetSearchResults[Number(btn.dataset.bsResIdx)];
+  if (!hit) return;
+  applyBrandSheetPick(items[brandSheetId], hit);
+});
 
 $('bsBrands').addEventListener('click', (ev) => {
   const more = ev.target.closest('button[data-bs-more]');
@@ -899,15 +969,12 @@ $('bsTypes').addEventListener('click', (ev) => {
   const selGroup = groups.find((g) => foldHu(g.brand) === foldHu(it.brand || ''));
   const t = selGroup?.types?.[Number(btn.dataset.bsTypeIdx)];
   if (!t) return;
-  const patch = {
+  applyBrandSheetPick(it, {
     brand: selGroup.brand,
-    type: t.label.slice(0, 80),
-  };
-  if (t.gtin) patch.barcode = t.gtin;
-  if (!it.qty && t.quantity) patch.qty = t.quantity.slice(0, 40);
-  edit(brandSheetId, patch);
-  $('brandSheet').close();
-  setStatus('Kiválasztva: ' + [patch.brand, patch.type].filter(Boolean).join(' · '));
+    label: t.label,
+    quantity: t.quantity,
+    gtin: t.gtin,
+  });
 });
 
 $('bsCustomForm').addEventListener('submit', (ev) => {

@@ -54,18 +54,28 @@
 
 <dialog id="brandSheet" aria-labelledby="bsTitle">
   <h2 id="bsTitle" tabindex="-1" autofocus>Márka és típus</h2>
-  <div class="bs-sec">
-    <div class="bs-label">Márka</div>
-    <div class="bs-chips" id="bsBrands"></div>
+  <div class="bs-search-wrap">
+    <input id="bsSearch" type="search" placeholder="Keresés…" autocomplete="off" enterkeyhint="search">
   </div>
-  <div class="bs-sec" id="bsTypeSec" hidden>
-    <div class="bs-label">Típus</div>
-    <div class="bs-chips" id="bsTypes"></div>
+  <div id="bsSearchResults" class="bs-sec" hidden>
+    <div class="bs-label">Találatok</div>
+    <div class="bs-results" id="bsResults"></div>
+    <div class="bs-hint" id="bsSearchHint" hidden>folytatás gépeléssel pontosítasz</div>
   </div>
-  <form class="bs-custom" id="bsCustomForm" hidden autocomplete="off">
-    <input id="bsCustomInput" maxlength="80" placeholder="Típus megadása…">
-    <button type="submit" class="primary">Mentés</button>
-  </form>
+  <div id="bsTwoStep">
+    <div class="bs-sec">
+      <div class="bs-label">Márka</div>
+      <div class="bs-chips" id="bsBrands"></div>
+    </div>
+    <div class="bs-sec" id="bsTypeSec" hidden>
+      <div class="bs-label">Típus</div>
+      <div class="bs-chips" id="bsTypes"></div>
+    </div>
+    <form class="bs-custom" id="bsCustomForm" hidden autocomplete="off">
+      <input id="bsCustomInput" maxlength="80" placeholder="Típus megadása…">
+      <button type="submit" class="primary">Mentés</button>
+    </form>
+  </div>
   <div class="edbtns">
     <button type="button" class="ghost" id="bsFullEdit">Részletes szerkesztés</button>
     <span class="grow"></span>

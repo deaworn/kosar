@@ -284,6 +284,15 @@ li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:
 .item.done .itype{color:var(--done)}
 
 /* Brand -> Type bottom sheet */
+.bs-search-wrap{margin-bottom:14px}
+.bs-search-wrap input{width:100%;box-sizing:border-box;background:var(--bg)}
+.bs-results{display:grid;gap:6px;max-height:46vh;overflow-y:auto}
+.bs-result{display:flex;align-items:baseline;gap:8px;width:100%;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:12px;padding:9px 12px;font:inherit;font-size:.88rem;cursor:pointer;text-align:left;transition:border-color .15s,background .15s}
+.bs-result:hover,.bs-result:focus-visible{border-color:var(--accent);outline:none}
+.bs-result b{font-weight:700;flex:none}
+.bs-result span{flex:1;min-width:0;overflow-wrap:anywhere}
+.bs-result small{color:var(--muted);font-size:.78rem;flex:none}
+.bs-hint,.bs-empty{font-size:.8rem;color:var(--muted);margin-top:8px}
 .bs-sec{margin-bottom:14px}
 .bs-label{font-size:.75rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px}
 .bs-chips{display:flex;flex-wrap:wrap;gap:8px}
