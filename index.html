@@ -66,6 +66,9 @@
       <label>Saját ár (€)<input id="edPrice" inputmode="decimal" placeholder="pl. 1,29"></label>
       <label>Bolt<input id="edStore" placeholder="pl. Aldi Süd"></label>
     </div>
+    <label id="edListWrap" hidden>Lista
+      <select id="edList"></select>
+    </label>
     <label>Szakasz
       <select id="edGroup">
         <option value="kell">Kell</option>
@@ -95,6 +98,7 @@
 
 <dialog id="menu" aria-label="Menü">
   <div class="menulist">
+    <button type="button" class="mitem" id="mNewList"><b>Új lista</b><span>új bevásárlólista létrehozása</span></button>
     <button type="button" class="mitem" id="mPlace"><b>Vásárlási hely</b><span id="mPlaceSub"></span></button>
     <button type="button" class="mitem" id="mHistory"><b>Korábbi tételek</b><span>törölt tételek visszahívása egy koppintással</span></button>
     <button type="button" class="mitem" id="mImport"><b>Lista importálása</b><span>régi lista beillesztése vagy fájlból</span></button>
@@ -187,6 +191,49 @@
     <span class="grow"></span>
     <button type="button" class="ghost" id="scCancel">Mégse</button>
   </div>
+</dialog>
+
+<dialog id="listMenu" aria-labelledby="lmTitle">
+  <h2 id="lmTitle" tabindex="-1" autofocus>Lista</h2>
+  <div class="menulist">
+    <button type="button" class="mitem" id="lmSend"><b>Küldés</b><span>megosztási link készítése</span></button>
+    <button type="button" class="mitem" id="lmEdit"><b>Beállítások</b><span>átnevezés és napi/heti ismétlődés</span></button>
+    <button type="button" class="mitem" id="lmClearDone" hidden><b>Kipipáltak törlése</b><span>ebben a listában</span></button>
+    <button type="button" class="mitem danger" id="lmDelete" hidden><b>Lista törlése</b><span>a lista és tételei törlése</span></button>
+  </div>
+  <div class="edbtns"><span class="grow"></span><button type="button" class="ghost" id="lmClose">Bezárás</button></div>
+</dialog>
+
+<dialog id="listDialog" aria-labelledby="ldTitle">
+  <form id="ldForm" method="dialog" autocomplete="off">
+    <h2 id="ldTitle" tabindex="-1" autofocus>Új lista</h2>
+    <label>Lista neve<input id="ldName" required maxlength="80" placeholder="pl. Heti nagybevásárlás"></label>
+    <label>Ismétlődés
+      <select id="ldRepeat">
+        <option value="none">Nincs</option>
+        <option value="daily">Naponta (pipák törlése)</option>
+        <option value="weekly">Hetente (pipák törlése)</option>
+      </select>
+    </label>
+    <label id="ldDayWrap" hidden>Melyik napon
+      <select id="ldWeekday">
+        <option value="1">Hétfő</option>
+        <option value="2">Kedd</option>
+        <option value="3">Szerda</option>
+        <option value="4">Csütörtök</option>
+        <option value="5">Péntek</option>
+        <option value="6">Szombat</option>
+        <option value="0">Vasárnap</option>
+      </select>
+    </label>
+    <div class="edbtns"><span class="grow"></span><button type="button" class="ghost" id="ldCancel">Mégse</button><button type="submit" class="primary" id="ldSave">Mentés</button></div>
+  </form>
+</dialog>
+
+<dialog id="shareConfirm" aria-labelledby="scShareTitle">
+  <h2 id="scShareTitle" tabindex="-1" autofocus>Megosztott lista</h2>
+  <p class="note" id="scShareMsg"></p>
+  <div class="edbtns"><span class="grow"></span><button type="button" class="ghost" id="scShareNo">Mégse</button><button type="button" class="primary" id="scShareYes">Hozzáadás</button></div>
 </dialog>
 
 <div class="zoom" id="zoom" hidden role="dialog" aria-label="Kép nagyítva, koppints a bezáráshoz"><img id="zoomImg" alt="" referrerpolicy="no-referrer"></div>

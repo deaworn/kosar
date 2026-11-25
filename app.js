@@ -16,6 +16,7 @@ import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
 import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, ownItemTips, pickCandidate, sortCandidates } from './candidates.js';
+import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, migrateToLists, applyListResets, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -46,29 +47,49 @@ const LS_PLACE = 'bv.shoppingPlace';
 let settings = null;
 try { const raw = localStorage.getItem(LS_PLACE); if (raw) settings = normalizePlace(JSON.parse(raw)); } catch { /* default */ }
 let shoppingPlace = settings || DEFAULT_PLACE;
-const LS_ITEMS = 'bv.items', LS_SCHEMA = 'bv.schema', SCHEMA = 5;
-let items = {}, savedAt = 0;
+const LS_ITEMS = 'bv.items', LS_LISTS = 'bv.lists', LS_ACTIVE_LIST = 'bv.activeList', LS_SCHEMA = 'bv.schema', SCHEMA = 6;
+let items = {}, lists = [], activeListId = DEFAULT_LIST_ID, savedAt = 0;
 try { items = JSON.parse(localStorage.getItem(LS_ITEMS) || '{}') || {}; savedAt = Number(localStorage.getItem('bv.itemsAt')) || 0; } catch { items = {}; }
+try { const rawLists = JSON.parse(localStorage.getItem(LS_LISTS) || 'null'); if (Array.isArray(rawLists)) lists = rawLists; } catch { lists = []; }
+try { activeListId = localStorage.getItem(LS_ACTIVE_LIST) || DEFAULT_LIST_ID; } catch { activeListId = DEFAULT_LIST_ID; }
 let storageOk = true, durableTimer = null;
 // Two copies: localStorage (instant at start-up) and IndexedDB (durable). Every
 // change goes to both; the IndexedDB write is coalesced over 300 ms.
 function persist() {
   savedAt = Date.now();
-  try { localStorage.setItem(LS_ITEMS, JSON.stringify(items)); localStorage.setItem('bv.itemsAt', String(savedAt)); storageOk = true; } catch { storageOk = false; }
+  try {
+    localStorage.setItem(LS_ITEMS, JSON.stringify(items));
+    localStorage.setItem(LS_LISTS, JSON.stringify(lists));
+    localStorage.setItem(LS_ACTIVE_LIST, activeListId);
+    localStorage.setItem('bv.itemsAt', String(savedAt));
+    storageOk = true;
+  } catch { storageOk = false; }
   clearTimeout(durableTimer);
-  durableTimer = setTimeout(() => { kvPut('items', { at: savedAt, items }).catch(() => {}); }, 300);
+  durableTimer = setTimeout(() => { kvPut('items', { at: savedAt, items, lists }).catch(() => {}); }, 300);
 }
 // At start-up: if the durable copy is newer (localStorage lost its last writes), use it.
 async function loadDurable() {
   try {
     // An older page holding the database open can block the upgrade: never let that hold up the app.
     const d = await Promise.race([kvGet('items'), new Promise((_, no) => setTimeout(() => no(new Error('idb timeout')), 3000))]);
-    if (d && d.items && d.at > savedAt) { items = d.items; savedAt = d.at; try { localStorage.setItem(LS_ITEMS, JSON.stringify(items)); localStorage.setItem('bv.itemsAt', String(savedAt)); } catch { /* blocked */ } render(); }
-    else if (!d) kvPut('items', { at: savedAt || Date.now(), items }).catch(() => {}); // first run of this version: seed it
+    if (d && d.items && d.at > savedAt) {
+      items = d.items;
+      if (Array.isArray(d.lists)) lists = d.lists;
+      savedAt = d.at;
+      lists = migrateToLists(lists, items);
+      applyListResets(lists, items);
+      try {
+        localStorage.setItem(LS_ITEMS, JSON.stringify(items));
+        localStorage.setItem(LS_LISTS, JSON.stringify(lists));
+        localStorage.setItem('bv.itemsAt', String(savedAt));
+      } catch { /* blocked */ }
+      render();
+    }
+    else if (!d) kvPut('items', { at: savedAt || Date.now(), items, lists }).catch(() => {}); // first run of this version: seed it
   } catch { /* IndexedDB unavailable: localStorage only */ }
 }
 // Flush the durable copy right away when the app goes to the background.
-document.addEventListener('visibilitychange', () => { if (document.hidden && durableTimer) { clearTimeout(durableTimer); durableTimer = null; kvPut('items', { at: savedAt, items }).catch(() => {}); } });
+document.addEventListener('visibilitychange', () => { if (document.hidden && durableTimer) { clearTimeout(durableTimer); durableTimer = null; kvPut('items', { at: savedAt, items, lists }).catch(() => {}); } });
 // Ask the browser not to evict the list under storage pressure (installed PWAs usually get this).
 navigator.storage?.persist?.().catch(() => {});
 
@@ -88,8 +109,50 @@ function uid() {
   return 'id-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
+function ensureActiveList() {
+  if (!lists.some((l) => l.id === activeListId)) {
+    activeListId = lists[0]?.id || DEFAULT_LIST_ID;
+  }
+  return activeListId;
+}
+
+function targetListForAdd() {
+  return ensureActiveList();
+}
+
+function updateAddPlaceholder() {
+  const curList = lists.find((l) => l.id === activeListId) || lists[0];
+  $('inName').placeholder = lists.length > 1 && curList ? 'Mit? (' + curList.name + ')' : 'Mit? Magyarul vagy németül';
+}
+
+function focusList(id) {
+  const l = lists.find((x) => x.id === id);
+  if (!l) return;
+  l.collapsed = false;
+  activeListId = l.id;
+  persist();
+  render();
+}
+
+function toggleList(id) {
+  if (lists.length <= 1) return;
+  const l = lists.find((x) => x.id === id);
+  if (!l) return;
+  l.collapsed = !l.collapsed;
+  if (!l.collapsed) activeListId = l.id;
+  persist();
+  const card = document.querySelector('#list .lcard[data-list-id="' + CSS.escape(id) + '"]');
+  if (!card) { render(); return; }
+  card.classList.toggle('collapsed', l.collapsed);
+  const btn = card.querySelector('.lcard-open');
+  if (btn) btn.setAttribute('aria-expanded', String(!l.collapsed));
+  const body = card.querySelector('.lcard-body');
+  if (body) body.inert = l.collapsed;
+  updateAddPlaceholder();
+}
+
 function edit(id, patch) {
-  const it = items[id] || (items[id] = { id, offerPlace: placeKey(shoppingPlace) });
+  const it = items[id] || (items[id] = { id, list: patch.list || targetListForAdd(), offerPlace: placeKey(shoppingPlace) });
   Object.assign(it, patch);
   persist(); render(); kickEnrich();
 }
@@ -101,15 +164,23 @@ try { hist = JSON.parse(localStorage.getItem(LS_HISTORY) || '{}') || {}; } catch
 // Schema migration. v1 -> v2: brands are split out of names; v2 -> v3: again, with
 // the longer brand list (e.g. "Golden Toast"); v3 -> v4: with brands learned from the
 // verified shop pages and the tobacco brands ("Dohány paramount"); v4 -> v5: pharmacy and
-// drugstore brands ("Gaviscon dual", Tomi 11097).
+// drugstore brands ("Gaviscon dual", Tomi 11097); v5 -> v6: multiple lists ("Kosár").
 // Items, ids and done states are never dropped. Runs after hist is loaded (learned brands).
 (function migrate() {
   let v = 1;
   try { v = Number(localStorage.getItem(LS_SCHEMA)) || 1; } catch { /* storage blocked */ }
-  if (v >= SCHEMA) return;
-  for (const it of Object.values(items)) relabel(it);
-  persist();
-  try { localStorage.setItem(LS_SCHEMA, String(SCHEMA)); } catch { /* retried next start */ }
+  let changed = false;
+  if (v < SCHEMA) {
+    if (v < 5) for (const it of Object.values(items)) relabel(it);
+    lists = migrateToLists(lists, items);
+    changed = true;
+    try { localStorage.setItem(LS_SCHEMA, String(SCHEMA)); } catch { /* retried next start */ }
+  } else {
+    lists = migrateToLists(lists, items);
+  }
+  if (applyListResets(lists, items).changed) changed = true;
+  ensureActiveList();
+  if (changed) persist();
 })();
 
 function saveHistory() {
@@ -133,7 +204,8 @@ function remove(id) {
 function restore(id) {
   const h = hist[id]; if (!h) return;
   const { deletedAt: _d, ...it } = h;
-  items[id] = { ...it, done: false, order: Date.now() };
+  const listId = it.list && lists.some((l) => l.id === it.list) ? it.list : targetListForAdd();
+  items[id] = { ...it, list: listId, done: false, order: Date.now() };
   delete hist[id]; saveHistory(); persist(); render(); reveal(id);
   setStatus('Visszahívva: ' + (it.hu || it.de));
 }
@@ -221,19 +293,33 @@ function setNet() {
 // ---- render -----------------------------------------------------------------
 function visible() { return Object.values(items).filter((i) => i.hu || i.de || i.recog); }
 
-// The picture is its own button: with a photo it zooms, without one it opens the editor.
+// The picture is its own button: with a photo it zooms; without one, no thumb is shown in compact rows.
 function iconHtml(it) {
   const p = pics(it);
-  const svg = '<svg viewBox="0 0 24 24">' + (ICONS[it.icon] || ICONS.bag) + '</svg>';
-  const img = p ? '<img src="' + esc(p.small) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onload="this.classList.add(\'ok\')" onerror="this.remove()">' : '';
-  return '<button type="button" class="icobtn" data-act="' + (p ? 'zoom' : 'edit') + '" aria-label="' + (p ? 'Kép nagyítása' : 'Szerkesztés') + '">' +
-    '<span class="ico' + (p?.own ? ' own' : '') + '">' + svg + img + '</span></button>';
+  if (!p) return '';
+  const img = '<img src="' + esc(p.small) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onload="this.classList.add(\'ok\')" onerror="this.remove()">';
+  return '<button type="button" class="icobtn" data-act="zoom" aria-label="Kép nagyítása">' +
+    '<span class="ico' + (p.own ? ' own' : '') + '">' + img + '</span></button>';
 }
 
 const forint = new Intl.NumberFormat('hu-HU', { maximumFractionDigits: 0 });
 const eur = (value) => COUNTRIES[shoppingPlace.country].currency === 'HUF'
   ? forint.format(value) + ' Ft'
   : Number(value).toFixed(2).replace('.', ',') + ' €';
+function itemPrice(it) {
+  if (it?.myPrice && Number.isFinite(Number(it.myPrice.value)) && Number(it.myPrice.value) > 0) {
+    return Number(it.myPrice.value);
+  }
+  const pv = chosenVariant(it);
+  if (pv && Number.isFinite(Number(pv.value)) && Number(pv.value) > 0) {
+    return Number(pv.value);
+  }
+  const op = it?.offer?.price;
+  if (op && Number.isFinite(Number(op.value)) && Number(op.value) > 0) {
+    return Number(op.value);
+  }
+  return null;
+}
 // "Aldi Süd 1,29 € / 200 g (11-18)": store, price, unit and the day it was read from the shop page.
 // a shop price always says its unit, or that the shop did not show one (Tomi 11003); own prices keep theirs
 // an online shop's price says so (shipping not added; Tomi 11104)
@@ -299,6 +385,8 @@ function rowHtml(it) {
     return '<span class="tag' + (dict ? '' : ' est') + '">' + (dict ? 'auto' : 'tipp?') + '</span>';
   };
   const g = GROUP_LABEL[it.group || 'kell'] ? '<span class="tag">' + GROUP_LABEL[it.group] + '</span>' : '';
+  const count = normalizeCount(it.count);
+  const qtyText = it.qty ? (count > 1 ? count + '× ' + it.qty : it.qty) : '';
   return '<div class="item' + (it.done ? ' done' : '') + '">' +
     '<button type="button" class="chk" data-act="toggle" aria-pressed="' + !!it.done + '" aria-label="' + esc(it.hu || it.de || 'fotós tétel') + ' kipipálása"><span class="box">' + CHECK + '</span></button>' +
     iconHtml(it) +
@@ -307,11 +395,31 @@ function rowHtml(it) {
     '<span class="names"><div class="hu">' + (it.hu || it.de ? esc(it.hu || it.de) + autoTag(it.hu ? 'hu' : 'de')
       : it.recog === 'failed' ? '<span class="est">Nem ismertem fel: koppints, írd be</span>' : '<span class="est">Felismerésre vár…</span>') + g + '</div>' +
     (it.hu && it.de ? '<div class="de">' + esc(it.de) + autoTag('de') + '</div>' : '') + metaHtml(it) + '</span>' +
-    (it.qty ? '<span class="qty">' + esc(it.qty) + '</span>' : '') + '</button></div>' + chooserHtml(it);
+    (qtyText ? '<span class="qty">' + esc(qtyText) + '</span>' : '') + '</button>' +
+    '<div class="stepper" role="group" aria-label="Darabszám">' +
+    '<button type="button" class="step-btn" data-act="dec" aria-label="Kevesebb"' + (count <= 1 ? ' disabled' : '') + '>−</button>' +
+    '<span class="step-val">' + count + '</span>' +
+    '<button type="button" class="step-btn" data-act="inc" aria-label="Több"' + (count >= 99 ? ' disabled' : '') + '>+</button>' +
+    '</div></div>' + chooserHtml(it);
+}
+
+const WEEKDAY_SHORT = ['V', 'H', 'K', 'Sze', 'Cs', 'P', 'Szo'];
+function repeatBadge(l) {
+  if (!l.repeat || l.repeat === 'none') return '';
+  if (l.repeat === 'daily') return '<span class="lrep">Naponta</span>';
+  return '<span class="lrep">Hetente · ' + (WEEKDAY_SHORT[l.weekday] || 'H') + '</span>';
 }
 
 // Bring a just-added item into view (new items sort to the end of their section).
 function reveal(id) {
+  const it = items[id];
+  if (it) {
+    const targetId = it.list && lists.some((x) => x.id === it.list) ? it.list : (lists[0]?.id || DEFAULT_LIST_ID);
+    const targetList = lists.find((x) => x.id === targetId);
+    if (targetList && (targetList.collapsed || activeListId !== targetId)) {
+      focusList(targetId);
+    }
+  }
   requestAnimationFrame(() => {
     const li = document.querySelector('#list li[data-id="' + CSS.escape(id) + '"]');
     if (!li) return;
@@ -322,32 +430,103 @@ function reveal(id) {
 
 function render() {
   for (const item of Object.values(items)) useItemPlace(item, shoppingPlace);
-  const all = visible(), total = all.length, done = all.filter((i) => i.done).length;
-  $('ringtxt').textContent = done + '/' + total;
-  $('bar').style.strokeDashoffset = String(150.8 * (1 - (total ? done / total : 0)));
-  $('sub').innerHTML = total ? (done === total ? '<b>Minden megvan.</b> Mehetsz a kasszához.' : 'Még <b>' + (total - done) + '</b> tétel hiányzik') : 'A lista üres';
+  ensureActiveList();
+  if (lists.length === 1 && lists[0].collapsed) lists[0].collapsed = false;
+  const all = visible();
   const order = { kell: 0, havan: 1, otthon: 2 };
   const by = (a, b) => (order[a.group || 'kell'] - order[b.group || 'kell']) || ((a.order || 0) - (b.order || 0));
-  const sections = [['Kell', all.filter((i) => !i.done).sort(by)], ['Megvan', all.filter((i) => i.done).sort(by)]];
-  const list = $('list');
-  list.innerHTML = total ? '' : '<div class="empty">Még nincs semmi a listán. Írd be lent, olvass be egy vonalkódot, vagy importáld a régi listát a ⋯ menüből.</div>';
-  for (const [label, rows] of sections) {
-    if (!rows.length) continue;
-    const sec = document.createElement('section');
-    sec.className = 'group';
-    sec.innerHTML = '<h2 class="glabel">' + label + ' · ' + rows.length + '</h2><ul>' + rows.map((it) => '<li data-id="' + esc(it.id) + '">' + rowHtml(it) + '</li>').join('') + '</ul>';
-    list.appendChild(sec);
+  const listEl = $('list');
+  listEl.innerHTML = '';
+  const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
+  const total = all.length, done = all.filter((i) => i.done).length;
+
+  $('ringtxt').textContent = done + '/' + total;
+  $('bar').style.strokeDashoffset = String(150.8 * (1 - (total ? done / total : 0)));
+  if (lists.length === 1) {
+    const curList = lists[0];
+    $('sub').innerHTML = esc(curList.name) + (total ? (done === total ? ' · <b>Minden megvan.</b>' : ' · még <b>' + (total - done) + '</b> tétel') : ' · üres');
+  } else {
+    $('sub').innerHTML = lists.length + ' lista' + (total ? (done === total ? ' · <b>minden megvan</b>' : ' · még <b>' + (total - done) + '</b> tétel') : '');
   }
+  updateAddPlaceholder();
+
+  const cards = document.createElement('div');
+  cards.className = 'lcards';
+  for (const l of lists) {
+    const lItems = all.filter((i) => (i.list || fallbackId) === l.id);
+    const lTotal = lItems.length, lDone = lItems.filter((i) => i.done).length;
+    const pct = lTotal ? Math.round((lDone / lTotal) * 100) : 0;
+    const est = listEstimate(lItems, itemPrice);
+    const estHtml = est.pricedCount > 0
+      ? '<span class="lest' + (est.allDone ? ' done' : '') + '">~' + esc(eur(est.total)) +
+        (est.missingCount > 0 ? '<span class="lest-miss"> · ' + est.missingCount + ' tétel ár nélkül</span>' : '') +
+        '</span>'
+      : '';
+    const sorted = [...lItems].sort((a, b) => Number(!!a.done) - Number(!!b.done) || by(a, b));
+    const preview = sorted.slice(0, 3).map((i) => i.hu || i.de).filter(Boolean);
+    const prevText = lTotal ? (preview.join(', ') + (lTotal > 3 ? '…' : '')) : 'Üres lista';
+    const collapsed = lists.length > 1 && Boolean(l.collapsed);
+
+    const card = document.createElement('article');
+    card.className = 'lcard' + (collapsed ? ' collapsed' : '');
+    card.dataset.listId = l.id;
+
+    const emptyMsg = lists.length === 1 && !all.length
+      ? 'Még nincs semmi a listán. Írd be lent, olvass be egy vonalkódot, vagy importáld a régi listát a ⋯ menüből.'
+      : 'Ez a lista még üres.';
+    const bodyHtml = lTotal
+      ? '<ul class="lcard-items">' + sorted.map((it) => '<li data-id="' + esc(it.id) + '">' + rowHtml(it) + '</li>').join('') + '</ul>'
+      : '<div class="lcard-empty">' + emptyMsg + '</div>';
+
+    card.innerHTML = '<div class="lcard-head">' +
+      '<button type="button" class="lcard-open" data-list-act="toggle" aria-expanded="' + (!collapsed) + '">' +
+      '<div class="lcard-top"><span class="lcard-title">' + esc(l.name) + '</span>' +
+      (lists.length > 1 ? '<span class="lcard-chev" aria-hidden="true">▾</span>' : '') + repeatBadge(l) + '</div>' +
+      '<div class="lcard-prog"><div class="lbar" aria-hidden="true"><div class="lbar-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="lprog">' + lDone + '/' + lTotal + '</span>' + estHtml + '</div>' +
+      '<div class="lcard-prev">' + esc(prevText) + '</div></button>' +
+      '<button type="button" class="lmenubtn" data-list-act="menu" aria-label="' + esc(l.name) + ' menü">⋯</button>' +
+      '</div>' +
+      '<div class="lcard-body"' + (collapsed ? ' inert' : '') + '><div class="lcard-body-inner">' + bodyHtml + '</div></div>';
+    cards.appendChild(card);
+  }
+  const newBtn = document.createElement('button');
+  newBtn.type = 'button';
+  newBtn.className = 'lcard-new';
+  newBtn.id = 'newListCard';
+  newBtn.dataset.listAct = 'new';
+  newBtn.textContent = '+ Új lista';
+  cards.appendChild(newBtn);
+  listEl.appendChild(cards);
+
   $('tools').hidden = done === 0;
   $('storeWarn').hidden = storageOk;
 }
 
 $('list').addEventListener('click', (ev) => {
+  const lbtn = ev.target.closest('[data-list-act]');
+  if (lbtn) {
+    const act = lbtn.dataset.listAct;
+    if (act === 'new') { openListDialog(null); return; }
+    const lid = lbtn.closest('[data-list-id]')?.dataset.listId;
+    const l = lists.find((x) => x.id === lid);
+    if (!l) return;
+    if (act === 'toggle') toggleList(l.id);
+    else if (act === 'menu') openListMenu(l.id);
+    return;
+  }
   const btn = ev.target.closest('button[data-act]');
   if (!btn) return;
   const id = btn.closest('li').dataset.id, it = items[id];
   if (!it) return;
+  const lid = it.list && lists.some((x) => x.id === it.list) ? it.list : (lists[0]?.id || DEFAULT_LIST_ID);
+  if (lid && activeListId !== lid) { activeListId = lid; updateAddPlaceholder(); }
   if (btn.dataset.act === 'toggle') edit(id, { done: !it.done });
+  else if (btn.dataset.act === 'dec' || btn.dataset.act === 'inc') {
+    const cur = normalizeCount(it.count);
+    const next = btn.dataset.act === 'inc' ? Math.min(99, cur + 1) : Math.max(1, cur - 1);
+    if (next !== cur) edit(id, { count: next });
+  }
   else if (btn.dataset.act === 'zoom') openZoom(pics(it));
   else if (btn.dataset.act === 'pick') {
     const c = activeCandidates(it)[Number(btn.dataset.i)];
@@ -369,7 +548,9 @@ function openZoom(p) {
 }
 function closeZoom() { $('zoom').hidden = true; $('zoomImg').removeAttribute('src'); }
 $('zoom').addEventListener('click', () => history.back());
-window.addEventListener('popstate', () => { if (!$('zoom').hidden) closeZoom(); });
+window.addEventListener('popstate', () => {
+  if (!$('zoom').hidden) closeZoom();
+});
 
 // ---- add ----------------------------------------------------------------------
 // Typing suggests earlier (deleted) items and product candidates from the cache;
@@ -402,6 +583,11 @@ async function loadHuCatalog() {
   return huCatalogLoad;
 }
 let lookupHuCatalog = () => [];
+let milkChooserOpen = false;
+const isMilkQuery = () => shoppingPlace.country === 'hu' && $('inName').value.trim().toLowerCase() === 'tej';
+const milkProducts = () => lookupHuCatalog(huCatalog.filter(({ normalizedName }) =>
+  /(?:^| )tej(?: |$)/.test(normalizedName) &&
+  !/(?:^| )(?:kokusz|szoja|zab|mandula|rizs|novenyi|por|suritett|kakao|csokis|vanilias|izesitett|gumimaci)(?: |$)/.test(normalizedName)), 'tej', 'hu');
 function renderSuggest() {
   const q = $('inName').value.trim().toLowerCase();
   const box = $('suggest');
@@ -434,10 +620,12 @@ function renderSuggest() {
   }).join('');
   const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
   const catalogHits = lookupHuCatalog(huCatalog, q, shoppingPlace.country);
-  const catalogHtml = catalogHits.map(({ gtin, name, brand, quantity }) =>
-    '<button type="button" class="sug" data-off-gtin="' + esc(gtin) + '"><b>' + esc(name) + '</b><span>'
-    + esc([brand, quantity].filter(Boolean).join(' · ')) + '</span><i>Open Food Facts</i></button>').join('');
-  box.innerHTML = histHtml + tipHtml + catalogHtml + headHtml + candHtml + pendHtml;
+  const catalogHtml = catalogHits.length ? '<div class="shead">Konkrét termékek</div>' + catalogHits.map(({ gtin, name, brand, quantity }) => {
+    const title = brand && !name.toLowerCase().startsWith(brand.toLowerCase()) ? brand + ' · ' + name : name;
+    return '<button type="button" class="sug" data-off-gtin="' + esc(gtin) + '"><b>' + esc(title) + '</b><span>'
+      + esc(quantity || 'Kiszerelés nincs megadva') + '</span><i>Open Food Facts</i></button>';
+  }).join('') : '';
+  box.innerHTML = catalogHtml + histHtml + tipHtml + headHtml + candHtml + pendHtml;
   box.hidden = !tips.length && !hits.length && !catalogHits.length && !cands.length && !pending;
 }
 function suggest() {
@@ -480,6 +668,7 @@ $('suggest').addEventListener('click', (ev) => {
     const c = st.candidates[Number(cbtn.dataset.cand)];
     if (!c) return;
     const it = addWithCandidate($('inName').value, c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates, matched: st.matched });
+    it.list = targetListForAdd();
     it.offerPlace = placeKey(shoppingPlace);
     items[it.id] = it;
     persist(); render(); reveal(it.id); kickEnrich();
@@ -540,6 +729,9 @@ function openEditor(id, d = null) {
   $('edHu').placeholder = id && !it.hu && !it.de ? 'írd be a nevét' : '';
   $('edHu').value = it.hu || ''; $('edDe').value = it.de || ''; $('edQty').value = it.qty || '';
   $('edBrand').value = it.brand || ''; $('edGroup').value = it.group || 'kell';
+  $('edListWrap').hidden = lists.length < 2;
+  const curListId = it.list && lists.some((l) => l.id === it.list) ? it.list : targetListForAdd();
+  $('edList').innerHTML = lists.map((l) => '<option value="' + esc(l.id) + '"' + (l.id === curListId ? ' selected' : '') + '>' + esc(l.name) + '</option>').join('');
   // pack sizes (round 12): Tomi picks one; the default (his usual band) is preselected
   const vs = id ? it.offer?.variants || [] : [], cur = id ? chosenVariant(it) : null;
   $('edVarWrap').hidden = vs.length < 2;
@@ -612,6 +804,7 @@ for (const fid of ['edPhotoFile', 'edPhotoCamFile']) {
 $('edPhotoDel').addEventListener('click', () => { edPhoto = null; showEdPhoto(editing); });
 $('edForm').addEventListener('submit', async () => {
   const v = { hu: $('edHu').value.trim(), de: $('edDe').value.trim(), qty: $('edQty').value.trim(), brand: $('edBrand').value.trim(), group: $('edGroup').value,
+    ...(!$('edListWrap').hidden ? { list: $('edList').value } : {}),
     ...(!$('edVarWrap').hidden ? { variant: $('edVariant').value } : {}) };
   // own price: always wins over the machine's ("saját"); an empty field removes it
   const pv = Number($('edPrice').value.replace(',', '.').replace(/[^\d.]/g, ''));
@@ -693,7 +886,7 @@ $('psGo').addEventListener('click', async () => {
 
 async function addPhotoItem(blob, extra = {}) {
   const id = uid();
-  items[id] = { id, hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), photo: true, recog: 'pending', ...extra };
+  items[id] = { id, list: targetListForAdd(), hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), photo: true, recog: 'pending', ...extra };
   persist();
   try { await setOwnPhoto(id, blob); } catch { setStatus('A fotót nem sikerült menteni (tárhely?).'); }
   if (!items[id].barcode) {
@@ -723,7 +916,7 @@ async function onBarcode(code) {
   try { frame = await resizeImage($('scVideo')); } catch { /* no frame */ }
   closeScanner();
   if (frame) await addPhotoItem(frame, { barcode: code });
-  else { const id = uid(); items[id] = { id, hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), recog: 'pending', barcode: code }; persist(); render(); kickRecognize(); }
+  else { const id = uid(); items[id] = { id, list: targetListForAdd(), hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), recog: 'pending', barcode: code }; persist(); render(); kickRecognize(); }
 }
 $('scPhoto').addEventListener('click', async () => {
   let frame = null;
@@ -929,25 +1122,32 @@ function parseImport(text) {
     const own = data.app === 'kosar';
     const rows = arr.filter((r) => r && (r.hu || r.de)).map((r) => ({
       id: r.id ? (String(r.id).startsWith('art-') || own || r.app === 'kosar' ? String(r.id) : 'art-' + r.id) : '',
+      ...(r.list ? { list: String(r.list) } : {}),
       hu: String(r.hu || '').slice(0, 120), de: String(r.de || '').slice(0, 120), qty: String(r.qty || '').slice(0, 40),
       brand: String(r.brand || '').slice(0, 60), group: ['kell', 'havan', 'otthon'].includes(r.group) ? r.group : 'kell',
       done: !!r.done, order: Number(r.order) || 0, ...(r.barcode ? { barcode: String(r.barcode).replace(/\D/g, '').slice(0, 14) } : {}),
     }));
-    return { rows, photos: own && data.photos && typeof data.photos === 'object' ? data.photos : {}, hist: own && data.hist && typeof data.hist === 'object' ? data.hist : {} };
+    const impLists = own && Array.isArray(data.lists) ? data.lists : [];
+    return { rows, lists: impLists, photos: own && data.photos && typeof data.photos === 'object' ? data.photos : {}, hist: own && data.hist && typeof data.hist === 'object' ? data.hist : {} };
   }
   const rows = t.split(/\r?\n/).map((l) => l.replace(/^\s*[-*•]\s*/, '').trim()).filter(Boolean)
     .map((hu, i) => ({ id: '', hu: hu.slice(0, 120), de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now() + i }));
-  return { rows, photos: {} };
+  return { rows, lists: [], photos: {} };
 }
-async function importData({ rows, photos, hist: h = {} }) {
+async function importData({ rows, lists: impLists = [], photos, hist: h = {} }) {
+  for (const l of impLists) {
+    if (l && l.id && !lists.some((x) => x.id === l.id)) lists.push(normalizeList(l, l.id));
+  }
   for (const [id, e] of Object.entries(h)) if (!items[id] && !hist[id] && e && (e.hu || e.de)) hist[id] = e; // earlier items from a backup
   if (Object.keys(h).length) saveHistory();
   let added = 0, updated = 0, pics = 0;
+  const fallbackList = targetListForAdd();
   for (const r0 of rows) {
     const r = applyBrand({ ...r0 });
     const id = r.id || 'imp-' + enrichKey(r.hu, r.de);
+    const listId = r.list && lists.some((l) => l.id === r.list) ? r.list : fallbackList;
     const cur = items[id];
-    if (cur) { Object.assign(cur, r, { id }); updated++; } else { items[id] = { ...r, id }; added++; }
+    if (cur) { Object.assign(cur, r, { id, list: cur.list || listId }); updated++; } else { items[id] = { ...r, id, list: listId }; added++; }
   }
   persist(); render(); kickEnrich();
   for (const [id, url] of Object.entries(photos)) {
@@ -992,6 +1192,7 @@ $('menuBtn').addEventListener('click', () => {
   if (ai.configured()) { const lf = ai.lastFailure(); ai.status().then((st) => { $('aiState').textContent = 'AI-segéd (gép): ' + st + (lf ? ' · utolsó hiba: ' + lf : ''); }); }
 });
 $('menuClose').addEventListener('click', () => $('menu').close());
+$('mNewList').addEventListener('click', () => { $('menu').close(); openListDialog(null); });
 $('mImport').addEventListener('click', () => openImport());
 $('mHistory').addEventListener('click', openHistory);
 function openShoppingPlace() {
@@ -1024,7 +1225,7 @@ $('mBackup').addEventListener('click', async () => {
   const photos = {};
   try { for (const [id, blob] of Object.entries(await allPhotos())) if (items[id] || hist[id]) photos[id] = await blobToDataUrl(blob); } catch { /* no photos */ }
   const rows = Object.values(items).map(({ enrich: _e, ...r }) => r);
-  const text = JSON.stringify({ app: 'kosar', version: SCHEMA, at: new Date().toISOString(), items: rows, hist, photos });
+  const text = JSON.stringify({ app: 'kosar', version: SCHEMA, at: new Date().toISOString(), lists, items: rows, hist, photos });
   // .txt / text/plain: Android Chrome only shares allow-listed file types, and JSON is not one of them.
   const name = 'kosar-mentes-' + new Date().toISOString().slice(0, 10) + '.txt';
   const file = new File([text], name, { type: 'text/plain' });
@@ -1187,7 +1388,143 @@ function renderKeyBanners() {
   });
 }
 
-// An import link carries the list in the URL fragment (#import=<base64url JSON>).
+// ---- multiple lists (create / edit / send / delete / incoming #list=) -------
+let menuListId = null, editingListId = null, pendingShareList = null;
+
+function openListMenu(listId) {
+  const l = lists.find((x) => x.id === listId);
+  if (!l) return;
+  menuListId = l.id;
+  $('lmTitle').textContent = l.name;
+  const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
+  const hasDone = visible().some((i) => (i.list || fallbackId) === l.id && i.done);
+  $('lmClearDone').hidden = !hasDone;
+  $('lmDelete').hidden = lists.length < 2;
+  $('listMenu').showModal();
+}
+$('lmClose').addEventListener('click', () => $('listMenu').close());
+$('lmEdit').addEventListener('click', () => { $('listMenu').close(); openListDialog(menuListId); });
+$('lmClearDone').addEventListener('click', () => {
+  $('listMenu').close();
+  const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
+  const gone = visible().filter((i) => (i.list || fallbackId) === menuListId && i.done);
+  for (const it of gone) remove(it.id);
+  setStatus(gone.length + ' kipipált tétel törölve.');
+});
+$('lmDelete').addEventListener('click', () => {
+  if (lists.length < 2) return;
+  const idx = lists.findIndex((x) => x.id === menuListId);
+  if (idx < 0) return;
+  const [removed] = lists.splice(idx, 1);
+  $('listMenu').close();
+  for (const it of Object.values(items)) {
+    if (it.list === removed.id) remove(it.id);
+  }
+  if (lists.length === 1) {
+    lists[0].collapsed = false;
+    activeListId = lists[0].id;
+  } else if (activeListId === removed.id) {
+    activeListId = lists[0].id;
+  }
+  persist(); render();
+  setStatus('Lista törölve: ' + removed.name);
+});
+$('lmSend').addEventListener('click', async () => {
+  const l = lists.find((x) => x.id === menuListId);
+  $('listMenu').close();
+  if (!l) return;
+  const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
+  const listItems = visible().filter((i) => (i.list || fallbackId) === l.id);
+  const link = encodeShareList(l, listItems, location.href);
+  if (navigator.share) {
+    try { await navigator.share({ title: l.name, text: l.name + ' (' + listItems.length + ' tétel)', url: link }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const ok = await copyText(link);
+  setStatus(ok ? 'Megosztási link másolva a vágólapra.' : 'A link másolása nem sikerült.');
+});
+
+function syncRepeatDayVisibility() {
+  $('ldDayWrap').hidden = $('ldRepeat').value !== 'weekly';
+}
+$('ldRepeat').addEventListener('change', syncRepeatDayVisibility);
+function openListDialog(listId) {
+  editingListId = listId;
+  const l = listId ? lists.find((x) => x.id === listId) : null;
+  $('ldTitle').textContent = l ? 'Lista beállításai' : 'Új lista';
+  $('ldName').value = l ? l.name : '';
+  $('ldRepeat').value = l ? (l.repeat || 'none') : 'none';
+  $('ldWeekday').value = String(l && Number.isInteger(l.weekday) ? l.weekday : 1);
+  syncRepeatDayVisibility();
+  $('listDialog').showModal();
+  $('ldName').focus();
+}
+$('ldCancel').addEventListener('click', () => $('listDialog').close());
+$('ldForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = $('ldName').value.trim().slice(0, 80);
+  if (!name) { $('ldName').focus(); return; }
+  const repeat = $('ldRepeat').value;
+  const weekday = Number($('ldWeekday').value);
+  if (editingListId) {
+    const l = lists.find((x) => x.id === editingListId);
+    if (l) {
+      const wasNone = !l.repeat || l.repeat === 'none';
+      l.name = name;
+      l.repeat = repeat;
+      l.weekday = weekday;
+      if (repeat !== 'none' && (wasNone || !l.lastReset)) l.lastReset = Date.now();
+    }
+    $('listDialog').close();
+    persist(); render();
+    setStatus('Lista mentve: ' + name);
+  } else {
+    const nl = normalizeList({
+      id: uid(),
+      name,
+      collapsed: false,
+      repeat,
+      weekday,
+      lastReset: repeat !== 'none' ? Date.now() : 0,
+    });
+    lists.push(nl);
+    $('listDialog').close();
+    focusList(nl.id);
+    setStatus('Új lista létrehozva: ' + name);
+  }
+});
+
+$('scShareNo').addEventListener('click', () => { pendingShareList = null; $('shareConfirm').close(); });
+$('scShareYes').addEventListener('click', () => {
+  const data = pendingShareList;
+  pendingShareList = null;
+  $('shareConfirm').close();
+  if (!data) return;
+  const nl = normalizeList({ id: uid(), name: data.name, collapsed: false, repeat: 'none', weekday: 1, lastReset: 0 });
+  lists.push(nl);
+  const baseOrder = Date.now();
+  data.items.forEach((raw, idx) => {
+    const id = uid();
+    items[id] = applyBrand({
+      id,
+      list: nl.id,
+      hu: raw.hu,
+      de: raw.de,
+      qty: raw.qty,
+      count: normalizeCount(raw.count),
+      brand: raw.brand,
+      group: raw.group,
+      done: false,
+      order: baseOrder + idx,
+      offerPlace: placeKey(shoppingPlace),
+    });
+  });
+  focusList(nl.id);
+  kickEnrich();
+  setStatus('Lista hozzáadva: ' + nl.name + ' (' + data.items.length + ' tétel)');
+});
+
+// An import link carries the list in the URL fragment (#import=<base64url JSON> or #list=<base64url JSON>).
 // The fragment never leaves the phone: browsers do not send it to the web host.
 function hashImport() {
   if (/^#ai=/i.test(location.hash)) {
@@ -1198,6 +1535,18 @@ function hashImport() {
       }
       return;
     }
+  }
+  if (/^#list=/i.test(location.hash)) {
+    const parsed = decodeShareList(location.hash);
+    history.replaceState(null, '', location.pathname + location.search);
+    if (!parsed) {
+      setStatus('A megosztott lista linkje hibás vagy túl nagy.');
+      return;
+    }
+    pendingShareList = parsed;
+    $('scShareMsg').textContent = parsed.name + ' lista érkezett, ' + parsed.items.length + ' tétel. Hozzáadod?';
+    $('shareConfirm').showModal();
+    return;
   }
   const m = location.hash.match(/^#import=([A-Za-z0-9_-]+)$/);
   if (!m) return;
@@ -1227,8 +1576,16 @@ function setStatus(t) { $('status').textContent = t || ''; clearTimeout(statusTi
 window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); kickEnrich(); kickRecognize(); kickOffers(); });
 window.addEventListener('offline', setNet);
 window.addEventListener('hashchange', hashImport); // import link opened while the app is already open
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { kickEnrich(); kickRecognize(); kickOffers(); } });
-window.addEventListener('storage', (e) => { if (e.key === LS_ITEMS) { try { items = JSON.parse(e.newValue || '{}'); } catch { /* keep */ } render(); } });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if (applyListResets(lists, items).changed) { persist(); render(); }
+    kickEnrich(); kickRecognize(); kickOffers();
+  }
+});
+window.addEventListener('storage', (e) => {
+  if (e.key === LS_ITEMS) { try { items = JSON.parse(e.newValue || '{}'); } catch { /* keep */ } render(); }
+  if (e.key === LS_LISTS) { try { const l = JSON.parse(e.newValue || 'null'); if (Array.isArray(l)) lists = migrateToLists(l, items); } catch { /* keep */ } render(); }
+});
 setInterval(() => { if (!document.hidden) { kickEnrich(); kickRecognize(); kickOffers(); } }, RETRY_MS);
 // Review: at every open and every hour while the app is open, whatever is missing
 // (German name, brand, picture, link, price) is asked for again. A phone does not
@@ -1248,7 +1605,9 @@ function review(force = false) {
 setInterval(() => { if (!document.hidden) review(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) review(); });
 render(); setNet(); hashImport(); renderKeyBanners();
-if (!settings && !$("importer").open) openShoppingPlace();
+if (!settings && !$("importer").open && !$('shareConfirm').open) openShoppingPlace();
+// A shared list arriving on a fresh phone asks first; the place question follows once it is answered.
+$('shareConfirm').addEventListener('close', () => { if (!settings) openShoppingPlace(); });
 loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); review(true); });
 
 if ('serviceWorker' in navigator) {
@@ -1258,7 +1617,7 @@ if ('serviceWorker' in navigator) {
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloaded) return;
-    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open) return; // never lose an open form
+    if ($('editor').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('shareConfirm').open) return; // never lose an open form
     reloaded = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(() => {});
