@@ -30,6 +30,7 @@
   <div class="ptr" id="ptr" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg></div>
   <div class="keybanner" id="keyBanner" hidden role="region" aria-label="Gépi segéd kulcs"></div>
   <div id="list"></div>
+  <div class="suggest" id="suggest" hidden></div>
 
   <div class="tools" id="tools" hidden>
     <button class="ghost" id="clearBtn" type="button">Kipipáltak törlése</button>
@@ -41,15 +42,6 @@
   </div>
   <div class="status" id="status" role="status"></div>
   <div class="warn" id="storeWarn" hidden>A telefon nem engedi menteni a listát (privát lap?). Nyisd meg sima Chrome-lapon.</div>
-</div>
-
-<div class="suggest" id="suggest" hidden></div>
-<div class="addbar">
-  <form id="addForm" autocomplete="off">
-    <input id="inName" placeholder="Mit? Magyarul vagy németül" aria-label="Tétel, magyarul vagy németül" enterkeyhint="done">
-    <button type="submit" aria-label="Hozzáadás">+</button>
-    <button type="button" class="scanbtn" id="camBtn" aria-label="Tétel fotóról"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.6"/></svg></button>
-  </form>
 </div>
 
 <dialog id="brandSheet" aria-labelledby="bsTitle">

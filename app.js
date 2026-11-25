@@ -190,9 +190,49 @@ function targetListForAdd() {
   return ensureActiveList();
 }
 
-function updateAddPlaceholder() {
-  const curList = lists.find((l) => l.id === activeListId) || lists[0];
-  $('inName').placeholder = lists.length > 1 && curList ? 'Mit? (' + curList.name + ')' : 'Mit? Magyarul vagy németül';
+let activeAddInput = null;
+function getActiveAddInput() {
+  if (activeAddInput && activeAddInput.isConnected) return activeAddInput;
+  return document.querySelector('#list .lcard:not(.collapsed) .lcard-add-input')
+    || document.querySelector('#list .lcard-add-input')
+    || null;
+}
+
+function getActiveAddListId() {
+  const inp = getActiveAddInput();
+  const lid = inp?.closest('.lcard-add')?.dataset.listAdd;
+  return lid && lists.some((l) => l.id === lid) ? lid : targetListForAdd();
+}
+
+function focusCardInput(listId) {
+  const card = listId ? document.querySelector('#list .lcard[data-list-id="' + CSS.escape(listId) + '"]') : null;
+  const inp = card?.querySelector('.lcard-add-input') || getActiveAddInput();
+  if (inp) {
+    activeAddInput = inp;
+    inp.focus();
+  }
+}
+
+function positionSuggest(inp = getActiveAddInput()) {
+  const box = $('suggest');
+  if (!box || box.hidden || !inp || !inp.isConnected) return;
+  const anchor = inp.closest('.lcard-add') || inp;
+  const rect = anchor.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+  const gap = 6;
+  const spaceBelow = vh - rect.bottom - gap - 8;
+  const spaceAbove = rect.top - gap - 8;
+  box.style.left = Math.max(8, rect.left) + 'px';
+  box.style.width = Math.max(200, rect.width) + 'px';
+  if (spaceBelow >= 180 || spaceBelow >= spaceAbove) {
+    box.style.top = Math.round(rect.bottom + gap) + 'px';
+    box.style.bottom = 'auto';
+    box.style.maxHeight = Math.max(120, Math.min(Math.round(vh * 0.52), Math.floor(spaceBelow))) + 'px';
+  } else {
+    box.style.bottom = Math.round(vh - rect.top + gap) + 'px';
+    box.style.top = 'auto';
+    box.style.maxHeight = Math.max(120, Math.min(Math.round(vh * 0.52), Math.floor(spaceAbove))) + 'px';
+  }
 }
 
 function focusList(id) {
@@ -218,7 +258,6 @@ function toggleList(id) {
   if (btn) btn.setAttribute('aria-expanded', String(!l.collapsed));
   const body = card.querySelector('.lcard-body');
   if (body) body.inert = l.collapsed;
-  updateAddPlaceholder();
 }
 
 function edit(id, patch) {
@@ -533,7 +572,6 @@ function render() {
   } else {
     $('sub').innerHTML = lists.length + ' lista' + (total ? (done === total ? ' · <b>minden megvan</b>' : ' · még <b>' + (total - done) + '</b> tétel') : '');
   }
-  updateAddPlaceholder();
 
   const cards = document.createElement('div');
   cards.className = 'lcards';
@@ -568,6 +606,11 @@ function render() {
     const bodyHtml = lTotal
       ? '<ul class="lcard-items">' + sorted.map((it) => '<li data-id="' + esc(it.id) + '">' + rowHtml(it) + '</li>').join('') + '</ul>'
       : '<div class="lcard-empty">' + emptyMsg + '</div>';
+    const addRowHtml = '<form class="lcard-add" data-list-add="' + esc(l.id) + '" autocomplete="off">' +
+      '<input class="lcard-add-input" placeholder="Mit ide, a(z) ' + esc(l.name) + ' listába…" aria-label="Új tétel a(z) ' + esc(l.name) + ' listába" enterkeyhint="done">' +
+      '<button type="submit" class="lcard-add-btn" aria-label="Hozzáadás">+</button>' +
+      '<button type="button" class="scanbtn lcard-cam-btn" data-list-cam="' + esc(l.id) + '" aria-label="Tétel fotóról (' + esc(l.name) + ')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.6"/></svg></button>' +
+      '</form>';
 
     card.innerHTML = '<div class="lcard-head">' +
       '<button type="button" class="lcard-open" data-list-act="toggle" aria-expanded="' + (!collapsed) + '">' +
@@ -578,7 +621,7 @@ function render() {
       '<div class="lcard-prev">' + esc(prevText) + '</div></button>' +
       '<button type="button" class="lmenubtn" data-list-act="menu" aria-label="' + esc(l.name) + ' menü">⋯</button>' +
       '</div>' +
-      '<div class="lcard-body"' + (collapsed ? ' inert' : '') + '><div class="lcard-body-inner">' + bodyHtml + '</div></div>';
+      '<div class="lcard-body"' + (collapsed ? ' inert' : '') + '><div class="lcard-body-inner">' + bodyHtml + addRowHtml + '</div></div>';
     cards.appendChild(card);
   }
   const newBtn = document.createElement('button');
@@ -597,6 +640,12 @@ function render() {
 let justDraggedAt = 0;
 $('list').addEventListener('click', (ev) => {
   if (Date.now() - justDraggedAt < 250) return;
+  const camBtn = ev.target.closest('.lcard-cam-btn');
+  if (camBtn) {
+    const lid = camBtn.dataset.listCam || camBtn.closest('[data-list-id]')?.dataset.listId;
+    openPhotoSheet(lid);
+    return;
+  }
   const lbtn = ev.target.closest('[data-list-act]');
   if (lbtn) {
     const act = lbtn.dataset.listAct;
@@ -613,7 +662,7 @@ $('list').addEventListener('click', (ev) => {
   const id = btn.closest('li').dataset.id, it = items[id];
   if (!it) return;
   const lid = it.list && lists.some((x) => x.id === it.list) ? it.list : (lists[0]?.id || DEFAULT_LIST_ID);
-  if (lid && activeListId !== lid) { activeListId = lid; updateAddPlaceholder(); }
+  if (lid && activeListId !== lid) activeListId = lid;
   if (btn.dataset.act === 'toggle') edit(id, { done: !it.done });
   else if (btn.dataset.act === 'dec' || btn.dataset.act === 'inc') {
     const cur = normalizeCount(it.count);
@@ -711,7 +760,10 @@ function endDragSession(commit) {
     const fallbackId = lists[0]?.id || DEFAULT_LIST_ID;
     const res = reorderOrMoveItem(items, s.id, s.targetListId, s.targetIndex, fallbackId);
     if (res.changedIds.length) {
-      if (res.prevListId !== res.nextListId) queueDeleteSync(res.prevListId, s.id);
+      if (res.prevListId !== res.nextListId) {
+        queueDeleteSync(res.prevListId, s.id);
+        activeListId = res.nextListId;
+      }
       for (const cid of res.changedIds) {
         if (items[cid]) queueItemSync(items[cid]);
       }
@@ -1040,10 +1092,10 @@ async function loadHuCatalog() {
   return huCatalogLoad;
 }
 let lookupHuCatalog = () => [];
-function renderSuggest() {
-  const q = $('inName').value.trim().toLowerCase();
+function renderSuggest(inp = getActiveAddInput()) {
+  const q = (inp?.value || '').trim().toLowerCase();
   const box = $('suggest');
-  if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
+  if (!inp || !inp.isConnected || q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
   const hits = ownItemTips(q, items, hist);
   const histHtml = hits.map(({ id, item: h, inList }) => {
     const variant = chosenVariant(h)?.name;
@@ -1057,6 +1109,7 @@ function renderSuggest() {
     const plainMilkHtml = '<button type="button" class="sug" data-plain-hu="Tej" data-plain-icon="milk"><b>Tej</b><span>márka és típus a listán választható</span></button>';
     box.innerHTML = plainMilkHtml + histHtml;
     box.hidden = false;
+    positionSuggest(inp);
     return;
   }
   const tips = dictionaryTips(q, shoppingPlace.country);
@@ -1085,49 +1138,88 @@ function renderSuggest() {
   }).join('') : '';
   box.innerHTML = catalogHtml + histHtml + tipHtml + headHtml + candHtml + pendHtml;
   box.hidden = !tips.length && !hits.length && !catalogHits.length && !cands.length && !pending;
+  if (!box.hidden) positionSuggest(inp);
 }
-function suggest() {
-  if (shoppingPlace.country === 'hu' && $('inName').value.trim().length >= 3) void loadHuCatalog();
-  typingCands.input($('inName').value);
-  renderSuggest();
+function suggest(inp = getActiveAddInput()) {
+  if (!inp) return;
+  if (shoppingPlace.country === 'hu' && inp.value.trim().length >= 3) void loadHuCatalog();
+  typingCands.input(inp.value);
+  renderSuggest(inp);
 }
-$('inName').addEventListener('input', suggest);
+$('list').addEventListener('focusin', (ev) => {
+  const inp = ev.target.closest('.lcard-add-input');
+  if (!inp) return;
+  if (activeAddInput !== inp) {
+    activeAddInput = inp;
+    typingCands.clear();
+  }
+  const lid = inp.closest('.lcard-add')?.dataset.listAdd;
+  if (lid && activeListId !== lid && lists.some((l) => l.id === lid)) {
+    activeListId = lid;
+    persist();
+  }
+  renderSuggest(inp);
+});
+$('list').addEventListener('input', (ev) => {
+  const inp = ev.target.closest('.lcard-add-input');
+  if (!inp) return;
+  activeAddInput = inp;
+  const lid = inp.closest('.lcard-add')?.dataset.listAdd;
+  if (lid && activeListId !== lid && lists.some((l) => l.id === lid)) {
+    activeListId = lid;
+    persist();
+  }
+  suggest(inp);
+});
+document.addEventListener('pointerdown', (ev) => {
+  const box = $('suggest');
+  if (!box || box.hidden) return;
+  if (ev.target.closest('#suggest') || ev.target.closest('.lcard-add')) return;
+  box.hidden = true;
+});
+window.addEventListener('scroll', () => positionSuggest(), { passive: true });
+window.addEventListener('resize', () => positionSuggest());
 $('suggest').addEventListener('click', (ev) => {
+  const inp = getActiveAddInput();
+  const lid = getActiveAddListId();
   const plain = ev.target.closest('button[data-plain-hu]');
   if (plain) {
     const id = uid();
-    edit(id, { hu: plain.dataset.plainHu, de: '', icon: plain.dataset.plainIcon || 'bag', qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
-    $('inName').value = '';
+    edit(id, { list: lid, hu: plain.dataset.plainHu, de: '', icon: plain.dataset.plainIcon || 'bag', qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
+    if (inp) inp.value = '';
     typingCands.clear();
+    renderSuggest();
     reveal(id);
-    $('inName').focus();
+    focusCardInput(lid);
     return;
   }
   const product = ev.target.closest('button[data-off-gtin]');
   if (product) {
-    const row = lookupHuCatalog(huCatalog, $('inName').value, shoppingPlace.country)
+    const row = lookupHuCatalog(huCatalog, inp?.value || '', shoppingPlace.country)
       .find(({ gtin }) => gtin === product.dataset.offGtin);
     if (!row) return;
     const id = uid();
-    edit(id, { hu: row.name, de: '', brand: row.brand, barcode: row.gtin, qty: '', group: 'kell', done: false, order: Date.now() });
-    $('inName').value = '';
+    edit(id, { list: lid, hu: row.name, de: '', brand: row.brand, barcode: row.gtin, qty: '', group: 'kell', done: false, order: Date.now() });
+    if (inp) inp.value = '';
     typingCands.clear();
+    renderSuggest();
     reveal(id);
-    $('inName').focus();
+    focusCardInput(lid);
     return;
   }
   const tip = ev.target.closest('button[data-tip]');
   if (tip) {
-    const query = $('inName').value;
+    const query = inp?.value || '';
     const row = dictionaryTips(query, shoppingPlace.country)[Number(tip.dataset.tip)];
     if (!row) return;
     const [hu, de, icon, cat] = row;
     const id = uid();
-    edit(id, { hu, de, icon, cat, qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
-    $('inName').value = '';
+    edit(id, { list: lid, hu, de, icon, cat, qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
+    if (inp) inp.value = '';
     typingCands.clear();
+    renderSuggest();
     reveal(id);
-    $('inName').focus();
+    focusCardInput(lid);
     return;
   }
   const cbtn = ev.target.closest('button[data-cand]');
@@ -1135,15 +1227,17 @@ $('suggest').addEventListener('click', (ev) => {
     const st = typingCands.getState();
     const c = st.candidates[Number(cbtn.dataset.cand)];
     if (!c) return;
-    const it = addWithCandidate($('inName').value, c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates, matched: st.matched });
-    it.list = targetListForAdd();
+    const it = addWithCandidate(inp?.value || '', c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates, matched: st.matched });
+    it.list = lid;
     it.offerPlace = placeKey(shoppingPlace);
     items[it.id] = it;
     queueItemSync(it);
     persist(); render(); reveal(it.id); kickEnrich();
-    $('inName').value = ''; typingCands.clear();
+    if (inp) inp.value = '';
+    typingCands.clear();
+    renderSuggest();
     setStatus('Felírva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
-    $('inName').focus();
+    focusCardInput(lid);
     return;
   }
   const own = ev.target.closest('button[data-own-id]');
@@ -1157,8 +1251,9 @@ $('suggest').addEventListener('click', (ev) => {
   } else {
     restore(id);
   }
-  $('inName').value = '';
+  if (inp) inp.value = '';
   typingCands.clear();
+  renderSuggest();
 });
 function openHistory() {
   if ($('menu').open) $('menu').close();
@@ -1173,13 +1268,19 @@ function openHistory() {
 $('hiList').addEventListener('click', (ev) => { const b = ev.target.closest('button.hrow'); if (!b) return; $('history').close(); restore(b.dataset.id); });
 $('hiClose').addEventListener('click', () => $('history').close());
 
-$('addForm').addEventListener('submit', (e) => {
+$('list').addEventListener('submit', (e) => {
+  const form = e.target.closest('.lcard-add');
+  if (!form) return;
   e.preventDefault();
   // one field, any language (Tomi 11205): the brand comes off first, then the language is told
   // apart (site/lang.js); when the phone is not sure, the home machine decides (langCheck)
-  const text = $('inName').value.trim();
-  if (!text) { $('inName').focus(); return; }
-  const r = applyBrand({ hu: text, de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
+  const inp = form.querySelector('.lcard-add-input');
+  const lid = form.dataset.listAdd;
+  const text = (inp?.value || '').trim();
+  if (!text) { inp?.focus(); return; }
+  const targetId = lid && lists.some((l) => l.id === lid) ? lid : targetListForAdd();
+  activeListId = targetId;
+  const r = applyBrand({ list: targetId, hu: text, de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now() });
   const lang = guessLang(r.hu);
   if (lang === 'de') { r.de = r.hu; r.hu = ''; }
   else {
@@ -1187,9 +1288,11 @@ $('addForm').addEventListener('submit', (e) => {
     r.hu = r.hu.replace(/^\p{Ll}/u, (c) => c.toUpperCase());
   }
   const nid = uid(); edit(nid, r); reveal(nid);
-  $('inName').value = ''; typingCands.clear();
+  if (inp) inp.value = '';
+  typingCands.clear();
+  renderSuggest();
   setStatus('Felírva: ' + (r.hu || r.de) + (r.brand ? ' (márka: ' + r.brand + ')' : '') + (navigator.onLine ? '' : ' (a német név és a fotó netre vár)'));
-  $('inName').focus();
+  focusCardInput(targetId);
 });
 
 // ---- editor -----------------------------------------------------------------
@@ -1315,7 +1418,14 @@ $('edDelete').addEventListener('click', () => {
 // below fills in the names when it can: a barcode read from the photo (offline,
 // on the phone) + Open Food Facts, and Claude on the home machine when reachable.
 let sheetBlob = null;
-function openPhotoSheet() {
+let photoTargetListId = null;
+function openPhotoSheet(listId = null) {
+  const validId = listId && lists.some((l) => l.id === listId) ? listId : targetListForAdd();
+  photoTargetListId = validId;
+  if (validId && activeListId !== validId) {
+    activeListId = validId;
+    persist();
+  }
   sheetBlob = null;
   $('psPreview').hidden = true; $('psChoices').hidden = false; $('psGo').hidden = true;
   $('psPaste').hidden = !navigator.clipboard?.read;
@@ -1330,7 +1440,6 @@ async function takeSheetFile(file) {
   if (!$('photoSheet').open) $('photoSheet').showModal();
   $('psGo').focus();
 }
-$('camBtn').addEventListener('click', openPhotoSheet);
 $('psCamera').addEventListener('click', () => $('psCamFile').click());   // native camera app (capture)
 $('psGallery').addEventListener('click', () => $('psGalFile').click());  // gallery / files
 for (const id of ['psCamFile', 'psGalFile']) {
@@ -1353,13 +1462,18 @@ document.addEventListener('paste', (e) => { // Ctrl+V / long-press paste while t
 $('psLive').addEventListener('click', () => { $('photoSheet').close(); openScanner(); });
 $('psCancel').addEventListener('click', () => $('photoSheet').close());
 $('psGo').addEventListener('click', async () => {
-  const blob = sheetBlob; $('photoSheet').close();
-  if (blob) await addPhotoItem(blob);
+  const blob = sheetBlob;
+  const listId = photoTargetListId;
+  $('photoSheet').close();
+  if (blob) await addPhotoItem(blob, {}, listId);
 });
 
-async function addPhotoItem(blob, extra = {}) {
+async function addPhotoItem(blob, extra = {}, listId = null) {
   const id = uid();
-  items[id] = { id, list: targetListForAdd(), hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), photo: true, recog: 'pending', ...extra };
+  const targetList = listId && lists.some((l) => l.id === listId)
+    ? listId
+    : (photoTargetListId && lists.some((l) => l.id === photoTargetListId) ? photoTargetListId : targetListForAdd());
+  items[id] = { id, list: targetList, hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), photo: true, recog: 'pending', ...extra };
   queueItemSync(items[id]);
   persist();
   try { await setOwnPhoto(id, blob); } catch { setStatus('A fotót nem sikerült menteni (tárhely?).'); }
@@ -1389,14 +1503,19 @@ async function onBarcode(code) {
   let frame = null;
   try { frame = await resizeImage($('scVideo')); } catch { /* no frame */ }
   closeScanner();
-  if (frame) await addPhotoItem(frame, { barcode: code });
-  else { const id = uid(); items[id] = { id, list: targetListForAdd(), hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), recog: 'pending', barcode: code }; queueItemSync(items[id]); persist(); render(); kickRecognize(); }
+  if (frame) await addPhotoItem(frame, { barcode: code }, photoTargetListId);
+  else {
+    const targetList = photoTargetListId && lists.some((l) => l.id === photoTargetListId) ? photoTargetListId : targetListForAdd();
+    const id = uid();
+    items[id] = { id, list: targetList, hu: '', de: '', qty: '', brand: '', group: 'kell', done: false, order: Date.now(), recog: 'pending', barcode: code };
+    queueItemSync(items[id]); persist(); render(); kickRecognize();
+  }
 }
 $('scPhoto').addEventListener('click', async () => {
   let frame = null;
   try { frame = await resizeImage($('scVideo')); } catch { /* camera gave no frame */ }
   closeScanner();
-  if (frame) await addPhotoItem(frame); else $('psCamFile').click();
+  if (frame) await addPhotoItem(frame, {}, photoTargetListId); else $('psCamFile').click();
 });
 $('scCancel').addEventListener('click', closeScanner);
 $('scanner').addEventListener('close', () => { scan?.stop(); scan = null; });
@@ -1551,7 +1670,7 @@ setInterval(() => { if (refreshRun) refreshTick(); }, 2000);
 const PULL_PX = 80;
 let pullY = null, pullD = 0;
 const anyOpen = () => [...document.querySelectorAll('dialog')].some((d) => d.open);
-addEventListener('touchstart', (e) => { pullY = scrollY <= 0 && !anyOpen() && e.touches.length === 1 && !e.target.closest('.addbar,.suggest,.keybanner') ? e.touches[0].clientY : null; pullD = 0; }, { passive: true });
+addEventListener('touchstart', (e) => { pullY = scrollY <= 0 && !anyOpen() && e.touches.length === 1 && !e.target.closest('.lcard-add,.suggest,.keybanner') ? e.touches[0].clientY : null; pullD = 0; }, { passive: true });
 addEventListener('touchmove', (e) => {
   if (pullY === null) return;
   pullD = Math.max(0, e.touches[0].clientY - pullY);
