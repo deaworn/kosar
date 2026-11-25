@@ -525,7 +525,7 @@ function rowHtml(it) {
     // Without a Hungarian name (e.g. a scanned product) the German name is the title.
     '<span class="names"><div class="hu">' + (it.hu || it.de ? esc(it.hu || it.de) + autoTag(it.hu ? 'hu' : 'de')
       : it.recog === 'failed' ? '<span class="est">Nem ismertem fel: koppints, írd be</span>' : '<span class="est">Felismerésre vár…</span>') + g + '</div>' +
-    (it.hu && it.de ? '<div class="de">' + esc(it.de) + autoTag('de') + '</div>' : '') +
+    (it.hu && it.de && lp !== 'none' && lp.country !== 'hu' ? '<div class="de">' + esc(it.de) + autoTag('de') + '</div>' : '') +
     (it.type ? '<div class="itype">' + esc(it.type) + '</div>' : '') + metaHtml(it) + '</span>' +
     (qtyText ? '<span class="qty">' + esc(qtyText) + '</span>' : '') + '</button>' +
     '<div class="stepper" role="group" aria-label="Darabszám">' +
