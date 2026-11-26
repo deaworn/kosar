@@ -16,7 +16,7 @@ import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
 import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, ownItemTips, pickCandidate, sortCandidates } from './candidates.js';
-import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, normalizeListPlace, resolveListPlace, migrateToLists, applyListResets, addIncomingList, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
+import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, normalizeListPlace, resolveListPlace, migrateToLists, applyListResets, addIncomingList, reorderLists, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
 import { DEFAULT_MODE, DEFAULT_ACCENT, getAccent, isAccentAvailable, resolveAccentId, accentsForMode, accentCssVars, accentSwatchStyle } from './accents.js';
 import { FIREBASE_CONFIG } from './sync/config.js';
 import { createFirebaseProvider } from './sync/firebase-provider.js';
@@ -633,7 +633,16 @@ function render() {
       '<button type="button" class="scanbtn lcard-cam-btn" data-list-cam="' + esc(l.id) + '" aria-label="Tétel fotóról (' + esc(l.name) + ')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.6"/></svg></button>' +
       '</form>';
 
+    const dragHandleHtml = lists.length > 1
+      ? '<span class="lcard-drag" aria-label="' + esc(l.name) + ' sorrendjének áthúzása" title="Hosszan nyomva áthúzható">' +
+        '<svg viewBox="0 0 12 18" aria-hidden="true">' +
+        '<circle cx="3.5" cy="3.5" r="1.4"/><circle cx="8.5" cy="3.5" r="1.4"/>' +
+        '<circle cx="3.5" cy="9" r="1.4"/><circle cx="8.5" cy="9" r="1.4"/>' +
+        '<circle cx="3.5" cy="14.5" r="1.4"/><circle cx="8.5" cy="14.5" r="1.4"/>' +
+        '</svg></span>'
+      : '';
     card.innerHTML = '<div class="lcard-head">' +
+      dragHandleHtml +
       '<button type="button" class="lcard-open" data-list-act="toggle" aria-expanded="' + (!collapsed) + '">' +
       '<div class="lcard-top"><span class="lcard-title">' + esc(l.name) + '</span>' +
       (lists.length > 1 ? '<span class="lcard-chev" aria-hidden="true">▾</span>' : '') + sharedBadge(l) + repeatBadge(l) + '</div>' +
@@ -800,7 +809,7 @@ function endDragSession(commit) {
 }
 
 $('list').addEventListener('pointerdown', (ev) => {
-  if (ev.button !== 0 || anyOpen() || dragSession) return;
+  if (ev.button !== 0 || anyOpen() || dragSession || listDragSession) return;
   if (ev.target.closest('.chk, .stepper, .icobtn, .chooser, .lcard-head, .lcard-new')) return;
   const li = ev.target.closest('.lcard-items li[data-id]');
   if (!li || !items[li.dataset.id]) return;
@@ -859,7 +868,7 @@ window.addEventListener('pointermove', (ev) => {
 });
 
 window.addEventListener('touchmove', (ev) => {
-  if (dragSession?.active) ev.preventDefault();
+  if (dragSession?.active || listDragSession?.active) ev.preventDefault();
 }, { passive: false });
 
 window.addEventListener('pointerup', (ev) => {
@@ -870,6 +879,149 @@ window.addEventListener('pointerup', (ev) => {
 window.addEventListener('pointercancel', (ev) => {
   if (!dragSession || ev.pointerId !== dragSession.pointerId) return;
   endDragSession(false);
+});
+
+// ---- long-press drag reorder for lists --------------------------------------
+let listDragSession = null;
+let listDragScrollRaf = 0;
+
+function clearListDragIndicators() {
+  for (const el of document.querySelectorAll('#list .list-drag-over-top, #list .list-drag-over-bot')) {
+    el.classList.remove('list-drag-over-top', 'list-drag-over-bot');
+  }
+}
+
+function updateListDragTarget(clientX, clientY) {
+  if (!listDragSession || !listDragSession.active) return;
+  clearListDragIndicators();
+  const others = [...document.querySelectorAll('#list .lcard[data-list-id]')]
+    .filter((el) => el.dataset.listId !== listDragSession.id);
+  if (!others.length) return;
+  let idx = others.length;
+  for (let i = 0; i < others.length; i++) {
+    const rect = others[i].getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      idx = i;
+      others[i].classList.add('list-drag-over-top');
+      break;
+    }
+  }
+  if (idx === others.length) {
+    others[others.length - 1].classList.add('list-drag-over-bot');
+  }
+  listDragSession.targetIndex = idx;
+}
+
+function stepListDragAutoScroll() {
+  if (!listDragSession || !listDragSession.active) { listDragScrollRaf = 0; return; }
+  const y = listDragSession.lastY;
+  const vh = window.innerHeight;
+  const edge = 72;
+  let dy = 0;
+  if (y < edge) dy = -Math.ceil(((edge - y) / edge) * 14);
+  else if (y > vh - edge) dy = Math.ceil(((y - (vh - edge)) / edge) * 14);
+  if (dy !== 0) {
+    window.scrollBy(0, dy);
+    updateListDragTarget(listDragSession.lastX, listDragSession.lastY);
+  }
+  listDragScrollRaf = requestAnimationFrame(stepListDragAutoScroll);
+}
+
+function endListDragSession(commit) {
+  if (!listDragSession) return;
+  const s = listDragSession;
+  listDragSession = null;
+  clearTimeout(s.timer);
+  if (listDragScrollRaf) { cancelAnimationFrame(listDragScrollRaf); listDragScrollRaf = 0; }
+  document.body.classList.remove('dragging');
+  clearListDragIndicators();
+  if (s.ghost) s.ghost.remove();
+  if (s.card) s.card.classList.remove('drag-src');
+  if (!s.active) return;
+
+  justDraggedAt = Date.now();
+  if (commit) {
+    const next = reorderLists(lists, s.id, s.targetIndex);
+    const changed = next.length === lists.length && next.some((l, i) => l.id !== lists[i].id);
+    if (changed) {
+      lists = next;
+      persist();
+      render();
+    }
+  }
+}
+
+$('list').addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0 || anyOpen() || dragSession || listDragSession || lists.length <= 1) return;
+  const head = ev.target.closest('.lcard-head');
+  if (!head || ev.target.closest('.lcard-open, .lmenubtn')) return;
+  const card = head.closest('.lcard[data-list-id]');
+  const lid = card?.dataset.listId;
+  const fromIdx = lid ? lists.findIndex((l) => l.id === lid) : -1;
+  if (!card || fromIdx === -1) return;
+  const rect = card.getBoundingClientRect();
+  const s = {
+    id: lid,
+    card,
+    pointerId: ev.pointerId,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    lastX: ev.clientX,
+    lastY: ev.clientY,
+    offsetY: ev.clientY - rect.top,
+    left: rect.left,
+    width: rect.width,
+    active: false,
+    ghost: null,
+    targetIndex: fromIdx,
+    timer: null,
+  };
+  s.timer = setTimeout(() => {
+    if (listDragSession !== s) return;
+    s.active = true;
+    pullY = null; pullD = 0;
+    try { navigator.vibrate?.(15); } catch { /* ignore */ }
+    document.body.classList.add('dragging');
+    const ghost = card.cloneNode(true);
+    ghost.removeAttribute('data-list-id');
+    ghost.querySelector('.lcard-body')?.remove();
+    ghost.className = 'lcard collapsed drag-ghost list-drag-ghost';
+    ghost.style.left = s.left + 'px';
+    ghost.style.width = s.width + 'px';
+    ghost.style.top = (s.lastY - s.offsetY) + 'px';
+    document.body.appendChild(ghost);
+    s.ghost = ghost;
+    card.classList.add('drag-src');
+    updateListDragTarget(s.lastX, s.lastY);
+    listDragScrollRaf = requestAnimationFrame(stepListDragAutoScroll);
+  }, LONG_PRESS_MS);
+  listDragSession = s;
+});
+
+window.addEventListener('pointermove', (ev) => {
+  if (!listDragSession || ev.pointerId !== listDragSession.pointerId) return;
+  listDragSession.lastX = ev.clientX;
+  listDragSession.lastY = ev.clientY;
+  if (!listDragSession.active) {
+    if (Math.hypot(ev.clientX - listDragSession.startX, ev.clientY - listDragSession.startY) > DRAG_MOVE_SLOP) {
+      endListDragSession(false);
+    }
+    return;
+  }
+  if (listDragSession.ghost) {
+    listDragSession.ghost.style.top = (ev.clientY - listDragSession.offsetY) + 'px';
+  }
+  updateListDragTarget(ev.clientX, ev.clientY);
+});
+
+window.addEventListener('pointerup', (ev) => {
+  if (!listDragSession || ev.pointerId !== listDragSession.pointerId) return;
+  endListDragSession(true);
+});
+
+window.addEventListener('pointercancel', (ev) => {
+  if (!listDragSession || ev.pointerId !== listDragSession.pointerId) return;
+  endListDragSession(false);
 });
 
 // ---- brand -> type bottom sheet ---------------------------------------------
@@ -1731,7 +1883,7 @@ setInterval(() => { if (refreshRun) refreshTick(); }, 2000);
 const PULL_PX = 80;
 let pullY = null, pullD = 0;
 const anyOpen = () => [...document.querySelectorAll('dialog')].some((d) => d.open);
-addEventListener('touchstart', (e) => { pullY = scrollY <= 0 && !anyOpen() && e.touches.length === 1 && !e.target.closest('.lcard-add,.suggest,.keybanner') ? e.touches[0].clientY : null; pullD = 0; }, { passive: true });
+addEventListener('touchstart', (e) => { pullY = scrollY <= 0 && !anyOpen() && e.touches.length === 1 && !e.target.closest('.lcard-add,.suggest,.keybanner,.lcard-drag') ? e.touches[0].clientY : null; pullD = 0; }, { passive: true });
 addEventListener('touchmove', (e) => {
   if (pullY === null) return;
   pullD = Math.max(0, e.touches[0].clientY - pullY);

@@ -154,6 +154,20 @@ export function addIncomingList(existingLists, items, incomingList) {
 }
 
 /**
+ * Returns a new array with the list identified by `draggedId` moved to `targetIndex`
+ * (clamped to `0 .. lists.length - 1`). Does not mutate the input array.
+ */
+export function reorderLists(lists, draggedId, targetIndex) {
+  if (!Array.isArray(lists)) return [];
+  const fromIdx = lists.findIndex((l) => l && l.id === draggedId);
+  if (fromIdx === -1 || lists.length <= 1) return [...lists];
+  const next = lists.filter((_, i) => i !== fromIdx);
+  const idx = Math.max(0, Math.min(next.length, Math.trunc(Number(targetIndex) || 0)));
+  next.splice(idx, 0, lists[fromIdx]);
+  return next;
+}
+
+/**
  * Creates a default list object.
  */
 export function createDefaultList() {

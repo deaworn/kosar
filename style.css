@@ -203,6 +203,10 @@ li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:
 .lcard:not(.collapsed){border:1.5px solid transparent;
   background:linear-gradient(var(--card), var(--card)) padding-box, var(--grad) border-box}
 .lcard-head{display:flex;align-items:stretch}
+.lcard-drag{flex:none;display:grid;place-items:center;width:30px;padding-left:6px;color:var(--muted);opacity:.65;cursor:grab;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.lcard-drag:hover{color:var(--ink);opacity:1}
+.lcard-drag svg{width:12px;height:18px;fill:currentColor}
+.lcard-drag + .lcard-open{padding-left:6px}
 .lcard-open{flex:1;min-width:0;display:grid;gap:7px;background:none;border:0;padding:13px 8px 13px 16px;text-align:left;color:inherit;font:inherit;cursor:pointer;border-radius:16px}
 .lcard-top{display:flex;align-items:center;gap:8px;min-width:0}
 .lcard-title{font-family:var(--f-display);font-weight:700;font-size:1.12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -310,8 +314,11 @@ li:has(.chooser) > .item{border-bottom-left-radius:0;border-bottom-right-radius:
 /* Long-press drag reorder & cross-list move */
 .lcard-items li{touch-action:pan-y}
 body.dragging,body.dragging *{user-select:none;-webkit-user-select:none}
-.lcard-items li.drag-src{opacity:.28}
+.lcard-items li.drag-src,.lcard.drag-src{opacity:.28}
 .lcard-items li.drag-over-top{box-shadow:inset 0 2px 0 var(--accent)}
 .lcard-items li.drag-over-bot{box-shadow:inset 0 -2px 0 var(--accent)}
+.lcard.list-drag-over-top{box-shadow:0 -4px 0 0 var(--accent),inset 0 2px 0 0 var(--accent)}
+.lcard.list-drag-over-bot{box-shadow:0 4px 0 0 var(--accent),inset 0 -2px 0 0 var(--accent)}
 .lcard.drag-target{outline:2px solid var(--accent);outline-offset:2px}
 .drag-ghost{position:fixed;z-index:40;pointer-events:none;background:var(--card);border:1.5px solid var(--accent);border-radius:14px;box-shadow:0 12px 28px rgba(0,0,0,.42);opacity:.95;transform:scale(1.02);list-style:none}
+.lcard.list-drag-ghost{border-radius:16px;box-shadow:0 14px 32px rgba(0,0,0,.45)}
