@@ -3,7 +3,7 @@
 [data-mode="dark"]{
   color-scheme:dark;
   --bg:#131314; --card:#1c1d1f; --ink:#f1f3f4; --muted:#9aa0a6; --line:#2c2e32;
-  --done:#757b82; --warn:#f87171; --tint-edge:rgba(255,255,255,.07);
+  --done:#757b82; --warn:#f87171; --best:#22c55e; --tint-edge:rgba(255,255,255,.07);
   --accent:#ff6d2d; --accent-ink:#111113; --est:#ffd54f;
   --grad:linear-gradient(135deg, #ff6d2d 0%, #ff9e2c 52%, #ffd54f 100%);
   --tint:color-mix(in srgb, var(--accent) 14%, var(--bg));
@@ -15,7 +15,7 @@
 [data-mode="light"]{
   color-scheme:light;
   --bg:#f4f6f8; --card:#ffffff; --ink:#14171a; --muted:#525c66; --line:#dde2e7;
-  --done:#78828c; --warn:#dc2626; --tint-edge:rgba(0,0,0,.05);
+  --done:#78828c; --warn:#dc2626; --best:#16a34a; --tint-edge:rgba(0,0,0,.05);
 }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -185,6 +185,35 @@ li:has(.chooser-wrap) > .item{border-bottom-left-radius:0;border-bottom-right-ra
 .cname{flex:1 1 6em;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .csub{min-width:0;overflow-wrap:anywhere;color:var(--muted);font-family:var(--f-mono);font-size:.72rem}
 .cprice{flex:none;white-space:nowrap;color:var(--accent);font-family:var(--f-mono);font-weight:700;font-size:.86rem}
+.cand.is-fav{border-color:var(--accent);background:var(--tint)}
+
+/* GTIN-merged multi-store product card (Tomi 12225/12236): one card, vertical store-price list */
+.cand-card{display:grid;gap:6px;width:100%;max-width:520px;margin:0 auto;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:8px 9px}
+.suggest .cand-card{background:var(--card)}
+.cand-card-head{display:flex;align-items:center;gap:8px;min-width:0}
+.cand-card-info{flex:1;min-width:0;display:grid;gap:1px}
+.cand-card-title{font-weight:700;font-size:.86rem;line-height:1.25;color:var(--ink);overflow-wrap:anywhere}
+.cand-card-unit{font-size:.72rem;color:var(--muted);font-family:var(--f-mono)}
+.cand-card-count{flex:none;font-size:.68rem;font-weight:700;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 7px;white-space:nowrap}
+.cand-stores{display:grid;gap:4px}
+.cand-store-row{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:6px 9px;color:var(--ink);font:inherit;font-size:.78rem;cursor:pointer;transition:border-color .15s,background .15s}
+.suggest .cand-store-row{background:var(--bg)}
+.cand-store-row:hover,.cand-store-row:focus-visible{border-color:var(--accent);background:var(--tint);outline:none}
+.cand-store-row.is-cheapest{border-color:var(--best);background:color-mix(in srgb, var(--best) 11%, var(--card))}
+.suggest .cand-store-row.is-cheapest{background:color-mix(in srgb, var(--best) 11%, var(--bg))}
+.cand-store-row.is-fav{border-color:var(--accent);background:var(--tint)}
+.cand-store-row.is-fav.is-cheapest{border-color:var(--best);box-shadow:inset 3px 0 0 var(--accent)}
+.cs-left{flex:1;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px}
+.cs-store{font-weight:700;font-size:.78rem;color:var(--ink);letter-spacing:.02em}
+.cs-scope{font-size:.68rem;color:var(--muted)}
+.cs-right{flex:none;display:flex;align-items:baseline;gap:8px;white-space:nowrap}
+.cs-unit{font-family:var(--f-mono);font-size:.7rem;color:var(--muted)}
+.cs-price{font-family:var(--f-mono);font-weight:700;font-size:.86rem;color:var(--ink)}
+.cand-store-row.is-cheapest .cs-price{color:var(--best)}
+.cand-store-row.is-fav:not(.is-cheapest) .cs-price{color:var(--accent)}
+.cbadge{display:inline-block;font-size:.64rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;border-radius:999px;padding:1px 6px;line-height:1.35;white-space:nowrap}
+.cbadge-best{background:color-mix(in srgb, var(--best) 20%, transparent);color:var(--best);border:1px solid color-mix(in srgb, var(--best) 55%, transparent)}
+.cbadge-fav{background:var(--tint-hi);color:var(--accent);border:1px solid color-mix(in srgb, var(--accent) 55%, transparent)}
 
 /* iOS Home Screen key banner & Safari copy tip (Tomi 11340-11343) */
 .keybanner{background:var(--tint);border:1px solid var(--tint-hi);border-radius:14px;padding:12px 12px 12px 14px;margin:4px 0 10px;display:grid;gap:8px}
@@ -299,8 +328,16 @@ li:has(.chooser-wrap) > .item{border-bottom-left-radius:0;border-bottom-right-ra
 .item.done .itype{color:var(--done)}
 
 /* Brand -> Type bottom sheet */
-.bs-search-wrap{margin-bottom:14px}
+.bs-search-wrap{margin-bottom:10px}
 .bs-search-wrap input{width:100%;box-sizing:border-box;background:var(--bg)}
+.bs-pref{display:grid;gap:8px;margin-bottom:14px;padding:8px 10px;background:var(--bg);border:1px solid var(--line);border-radius:12px}
+.bs-pref-modes{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.bs-pref-btn{background:var(--card);border:1px solid var(--line);color:var(--muted);border-radius:9px;padding:7px 10px;font:inherit;font-size:.82rem;font-weight:700;cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+.bs-pref-btn[aria-pressed="true"]{background:var(--grad);color:var(--accent-ink);border-color:transparent}
+.bs-pref-store-wrap{display:flex;align-items:center;gap:8px;margin:0;font-size:.78rem;color:var(--muted)}
+.bs-pref-store-wrap span{flex:none}
+.bs-pref-store-wrap select{flex:1;min-width:0;margin:0;padding:7px 10px;font-size:.84rem;background:var(--card)}
+.bs-offers{display:grid;gap:6px;max-height:42vh;overflow-y:auto}
 .bs-results{display:grid;gap:6px;max-height:46vh;overflow-y:auto}
 .bs-result{display:flex;align-items:baseline;gap:8px;width:100%;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:12px;padding:9px 12px;font:inherit;font-size:.88rem;cursor:pointer;text-align:left;transition:border-color .15s,background .15s}
 .bs-result:hover,.bs-result:focus-visible{border-color:var(--accent);outline:none}

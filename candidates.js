@@ -9,6 +9,16 @@ import { applyBrand, splitBrand, learnable } from './brand.js';
 import { guessLang } from './lang.js';
 import { shopName } from './name-check.js';
 import { unitLabel } from './units.js';
+import { normalizeSortPref, storeMatchesPref } from './sort-pref.js';
+
+export function normalizeGtin(value) {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  return digits.length >= 8 && digits.length <= 14 ? digits : '';
+}
+
+export function canonicalGtin(value) {
+  return normalizeGtin(value).replace(/^0+/, '');
+}
 
 const fold = (s) => String(s || '').toLowerCase().normalize('NFC').replace(/\s+/g, ' ').trim();
 const asciiFold = (s) => fold(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
@@ -340,8 +350,36 @@ export function calcUnitPrice(priceOrObj, unitStr = '', baseStr = '') {
 const NON_PRODUCT = /(?<![a-zäöüß])([a-zäöüß]*backmischung|fertigmischung|mischung\s+zum\s+backen|[a-zäöüß]*teig|[a-zäöüß]*gew(?:ü|ue)rz(?:mischung|zubereitung)?|[a-zäöüß]*aroma|[a-zäöüß]*form(?:en)?|[a-zäöüß]*dose(?:n)?|brot(?:kasten|box|korb|beutel|topf|messer|schneider|backautomat)|back(?:pulver|hefe|mittel|zutat))(?![a-zäöüß])/i;
 export const isNonProduct = (name) => NON_PRODUCT.test(String(name || '').normalize('NFC'));
 
-// Turns a verified page result ({ link, price }) or a candidate object into a normalised candidate.
-export function toCandidate(v, learned = []) {
+function compareOffersByPrice(a, b, mainBase = '') {
+  const aMain = Boolean(mainBase && a.unitPrice != null && a.unitBase === mainBase);
+  const bMain = Boolean(mainBase && b.unitPrice != null && b.unitBase === mainBase);
+  if (aMain !== bMain) return aMain ? -1 : 1;
+  if (aMain && bMain && a.unitPrice !== b.unitPrice) return a.unitPrice - b.unitPrice;
+  if (a.unitPrice != null && b.unitPrice != null && a.unitBase && a.unitBase === b.unitBase && a.unitPrice !== b.unitPrice) {
+    return a.unitPrice - b.unitPrice;
+  }
+  if (a.price !== b.price) return a.price - b.price;
+  return String(a.store || '').localeCompare(String(b.store || ''), 'de')
+    || String(a.name || '').localeCompare(String(b.name || ''), 'de');
+}
+
+function dominantUnitBase(list) {
+  const counts = new Map();
+  for (const c of list) {
+    if (c?.unitPrice != null && c.unitBase) counts.set(c.unitBase, (counts.get(c.unitBase) || 0) + 1);
+  }
+  const order = { kg: 3, l: 2, db: 1 };
+  let mainBase = '', bestCount = 0;
+  for (const [b, n] of counts) {
+    if (n > bestCount || (n === bestCount && (order[b] || 0) > (order[mainBase] || 0))) {
+      mainBase = b;
+      bestCount = n;
+    }
+  }
+  return mainBase;
+}
+
+function toStoreOffer(v, learned = [], fallback = null) {
   if (!v || typeof v !== 'object') return null;
   const link = v.link && typeof v.link === 'object' ? v.link : {};
   const p = v.price && typeof v.price === 'object' ? v.price : null;
@@ -350,12 +388,12 @@ export function toCandidate(v, learned = []) {
   const store = String(p?.store || link.store || v.store || '').trim();
   if (!store) return null;
   const url = String(p?.url || link.url || v.url || '').trim();
-  const rawName = String(link.name || v.name || '').trim();
+  const rawName = String(link.name || v.name || fallback?.name || '').trim();
   const name = shopName(rawName) || rawName;
   if (isNonProduct(rawName) || isNonProduct(name)) return null;
-  let brand = String(link.brand || v.brand || '').trim();
+  let brand = String(link.brand || v.brand || fallback?.brand || '').trim();
   if (!brand && name) { const sb = splitBrand(name, learned); if (sb) brand = sb.brand; }
-  const rawUnit = String(p?.unit ?? v.unit ?? '').trim();
+  const rawUnit = String(p?.unit ?? v.unit ?? fallback?.unit ?? '').trim();
   const nameUnit = packFromText(name);
   const unit = (!hasWeightOrVol(rawUnit) && hasWeightOrVol(nameUnit)) ? nameUnit : (packFromText(rawUnit) || rawUnit || nameUnit);
   const base = String(p?.base ?? v.base ?? '').trim();
@@ -364,10 +402,11 @@ export function toCandidate(v, learned = []) {
     unit: String(v.unitBase || v.unitPriceUnit || '').trim(),
     text: String(v.unitPriceText || '').trim() || (Number(v.unitPrice).toFixed(2).replace('.', ',') + ' €' + (v.unitBase ? ' / ' + v.unitBase : '')),
   } : null);
-  const currency = p?.currency || v.currency;
-  const image = String(link.image ?? v.image ?? '').trim();
-  const date = String(p?.date || v.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const currency = p?.currency || v.currency || fallback?.currency;
+  const image = String(link.image ?? v.image ?? fallback?.image ?? '').trim();
+  const date = String(p?.date || v.date || fallback?.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   const online = !!(p?.online || v.online);
+  const gtin = normalizeGtin(v.gtin || link.gtin || p?.gtin || fallback?.gtin || '');
   return {
     name,
     brand,
@@ -382,6 +421,7 @@ export function toCandidate(v, learned = []) {
     image,
     url,
     date,
+    ...(gtin ? { gtin } : {}),
     ...(online ? { online: true } : {}),
     ...((p?.inArea ?? v.inArea) === false ? { inArea: false } : {}),
     ...((p?.onlineAvailable ?? v.onlineAvailable) === false ? { onlineAvailable: false } : {}),
@@ -389,36 +429,176 @@ export function toCandidate(v, learned = []) {
   };
 }
 
-// Candidates sorted by the unit-price base most candidates share (usually €/kg), cheapest first;
-// never compares different bases. Candidates with another base or no unit price sort after them
-// by package price ascending, then store and product name.
-export function sortCandidates(candidates, learned = []) {
-  if (!Array.isArray(candidates)) return [];
-  const list = candidates.map((c) => toCandidate(c, learned)).filter(Boolean);
-  const counts = new Map();
-  for (const c of list) {
-    if (c.unitPrice != null && c.unitBase) counts.set(c.unitBase, (counts.get(c.unitBase) || 0) + 1);
-  }
-  const order = { kg: 3, l: 2, db: 1 };
-  let mainBase = '', bestCount = 0;
-  for (const [b, n] of counts) {
-    if (n > bestCount || (n === bestCount && (order[b] || 0) > (order[mainBase] || 0))) {
-      mainBase = b;
-      bestCount = n;
+// Turns a verified page result ({ link, price }) or a candidate object into a normalised candidate.
+export function toCandidate(v, learned = []) {
+  const base = toStoreOffer(v, learned);
+  if (!base) return null;
+  if (Array.isArray(v.stores) && v.stores.length) {
+    const dedup = new Map();
+    for (const rawStore of v.stores) {
+      const s = toStoreOffer(rawStore, learned, base);
+      if (!s) continue;
+      const sk = fold(s.store);
+      const prev = dedup.get(sk);
+      if (!prev || (prev.onlineAvailable === false && s.onlineAvailable !== false) || compareOffersByPrice(s, prev) < 0) {
+        dedup.set(sk, s);
+      }
+    }
+    const stores = [...dedup.values()];
+    if (stores.length > 1) {
+      const mb = dominantUnitBase(stores);
+      stores.sort((a, b) => compareOffersByPrice(a, b, mb));
+      const cheapest = stores[0];
+      return {
+        ...cheapest,
+        name: cheapest.name || base.name,
+        brand: cheapest.brand || base.brand || stores.find(s => s.brand)?.brand || '',
+        image: cheapest.image || base.image || stores.find(s => s.image)?.image || '',
+        ...(cheapest.gtin || base.gtin ? { gtin: cheapest.gtin || base.gtin } : {}),
+        stores,
+      };
     }
   }
-  return list.sort((a, b) => {
-    const aMain = Boolean(mainBase && a.unitPrice != null && a.unitBase === mainBase);
-    const bMain = Boolean(mainBase && b.unitPrice != null && b.unitBase === mainBase);
-    if (aMain !== bMain) return aMain ? -1 : 1;
-    if (aMain && bMain && a.unitPrice !== b.unitPrice) return a.unitPrice - b.unitPrice;
-    if (a.price !== b.price) return a.price - b.price;
-    return a.store.localeCompare(b.store, 'de') || a.name.localeCompare(b.name, 'de');
-  });
+  return base;
 }
 
-// Deduplicates verified results and returns at most `max` (default 8) sorted by unit price.
-export function buildCandidates(verifiedList, { max = 8, learned = [] } = {}) {
+// Merges candidates that share the same canonical GTIN (leading-zero normalized barcode) across stores
+// into a single unified candidate record with `stores: [...]` ordered cheapest-first.
+// Candidates without a GTIN or present in only one store stay as standard single-store candidates.
+export function mergeCandidatesByGtin(candidates, learned = []) {
+  if (!Array.isArray(candidates)) return [];
+  const flattened = [];
+  for (const raw of candidates) {
+    const c = toCandidate(raw, learned);
+    if (!c) continue;
+    if (Array.isArray(c.stores) && c.stores.length > 1) {
+      for (const s of c.stores) {
+        flattened.push({ ...s, gtin: s.gtin || c.gtin || '' });
+      }
+    } else {
+      flattened.push(c);
+    }
+  }
+
+  const byGtin = new Map();
+  const nonGtinSeen = new Set();
+  const out = [];
+
+  for (const entry of flattened) {
+    const cg = canonicalGtin(entry.gtin);
+    if (cg) {
+      let group = byGtin.get(cg);
+      if (!group) {
+        group = new Map();
+        byGtin.set(cg, group);
+      }
+      const sk = fold(entry.store);
+      const prev = group.get(sk);
+      if (!prev || (prev.onlineAvailable === false && entry.onlineAvailable !== false) || compareOffersByPrice(entry, prev) < 0) {
+        group.set(sk, entry);
+      }
+    } else {
+      const key = (entry.url || (entry.store + '|' + entry.name + '|' + entry.unit)).toLowerCase();
+      if (nonGtinSeen.has(key)) continue;
+      nonGtinSeen.add(key);
+      out.push(entry);
+    }
+  }
+
+  for (const storeMap of byGtin.values()) {
+    const stores = [...storeMap.values()];
+    if (!stores.length) continue;
+    if (stores.length === 1) {
+      out.push(stores[0]);
+      continue;
+    }
+    const mb = dominantUnitBase(stores);
+    stores.sort((a, b) => compareOffersByPrice(a, b, mb));
+    const cheapest = stores[0];
+    out.push({
+      ...cheapest,
+      name: cheapest.name || stores.find(s => s.name)?.name || '',
+      brand: cheapest.brand || stores.find(s => s.brand)?.brand || '',
+      image: cheapest.image || stores.find(s => s.image)?.image || '',
+      gtin: cheapest.gtin || stores.find(s => s.gtin)?.gtin || '',
+      stores,
+    });
+  }
+  return out;
+}
+
+// Orders a candidate's store offers according to the active sort preference.
+// - Always marks the lowest-priced store(s) with `isCheapest: true`.
+// - In `'store'` mode with a favorite store, moves the favorite store to index 0 with `isFavorite: true`
+//   (even when another store is cheaper), while preserving ascending price order for all other stores.
+export function orderCandidateStores(cand, sortPref = null) {
+  if (!cand || typeof cand !== 'object') return [];
+  const pref = normalizeSortPref(sortPref);
+  const rawStores = Array.isArray(cand.stores) && cand.stores.length
+    ? cand.stores
+    : [cand];
+  const mb = dominantUnitBase(rawStores);
+  const cheapestFirst = [...rawStores].sort((a, b) => compareOffersByPrice(a, b, mb));
+  const best = cheapestFirst[0];
+  const isSameBest = (entry) => {
+    if (!best) return false;
+    if (mb && best.unitBase === mb && entry.unitBase === mb && best.unitPrice != null && entry.unitPrice != null) {
+      return entry.unitPrice === best.unitPrice && entry.price === best.price;
+    }
+    return entry.price === best.price;
+  };
+  const wantFav = Boolean(pref?.mode === 'store' && pref.store);
+  const tagged = cheapestFirst.map((entry) => ({
+    ...entry,
+    isCheapest: isSameBest(entry),
+    isFavorite: wantFav && storeMatchesPref(entry.store, pref.store),
+  }));
+  if (!wantFav) return tagged;
+  const favs = tagged.filter(s => s.isFavorite);
+  if (!favs.length) return tagged;
+  const rest = tagged.filter(s => !s.isFavorite);
+  return [...favs, ...rest];
+}
+
+// Builds a flat candidate ready for pickCandidate / addWithCandidate when the user taps
+// a specific store row inside a GTIN-merged candidate card.
+export function pickStoreFromCandidate(cand, storeOffer) {
+  if (!cand || !storeOffer) return cand || null;
+  const { stores: _stores, ...parent } = cand;
+  const { isCheapest: _c, isFavorite: _f, ...offer } = storeOffer;
+  return {
+    ...parent,
+    ...offer,
+    name: offer.name || parent.name,
+    brand: offer.brand || parent.brand,
+    image: offer.image || parent.image,
+    gtin: offer.gtin || parent.gtin || '',
+  };
+}
+
+// Candidates sorted by the unit-price base most candidates share (usually €/kg or Ft/l), cheapest first;
+// never compares different bases. When `sortPref` has `mode: 'store'` and a favorite store,
+// candidates available in that store come first (ordered by that store's price), followed by others.
+export function sortCandidates(candidates, learned = [], sortPref = null) {
+  if (!Array.isArray(candidates)) return [];
+  const merged = mergeCandidatesByGtin(candidates, learned);
+  const pref = normalizeSortPref(sortPref);
+  const wantFav = Boolean(pref?.mode === 'store' && pref.store);
+  const decorated = merged.map((c) => {
+    const ordered = orderCandidateStores(c, pref);
+    const favOffer = wantFav ? ordered.find(s => s.isFavorite) || null : null;
+    const effective = favOffer || ordered[0] || c;
+    return { c, hasFav: Boolean(favOffer), effective };
+  });
+  const mainBase = dominantUnitBase(decorated.map(d => d.effective));
+  return decorated.sort((a, b) => {
+    if (wantFav && a.hasFav !== b.hasFav) return a.hasFav ? -1 : 1;
+    return compareOffersByPrice(a.effective, b.effective, mainBase);
+  }).map(d => d.c);
+}
+
+// Deduplicates verified results, merges matching GTINs across stores, and returns at most `max` (default 8) sorted by unit price.
+export function buildCandidates(verifiedList, { max = 8, learned = [], sortPref = null } = {}) {
   const seen = new Set(), list = [];
   for (const raw of verifiedList || []) {
     const c = toCandidate(raw, learned);
@@ -428,14 +608,14 @@ export function buildCandidates(verifiedList, { max = 8, learned = [] } = {}) {
     seen.add(key);
     list.push(c);
   }
-  return sortCandidates(list, learned).slice(0, max);
+  return sortCandidates(list, learned, sortPref).slice(0, max);
 }
 
 // Active candidates for an item's chooser on the phone: empty once picked, checked off, or overridden by own price.
-export function activeCandidates(it) {
+export function activeCandidates(it, sortPref = null) {
   if (!it || it.done || it.myPrice || it.offer?.picked) return [];
   const cs = it.offer?.candidates;
-  return Array.isArray(cs) && cs.length > 0 ? sortCandidates(cs) : [];
+  return Array.isArray(cs) && cs.length > 0 ? sortCandidates(cs, [], sortPref) : [];
 }
 
 // Display title for a candidate row in the chooser (includes brand if not already in the name).
@@ -473,6 +653,7 @@ export function pickCandidate(it, cand, learned = [], keys = null) {
   const hadAutoDe = !!(it.de && it.enrich?.autoVals?.de === it.de);
   if (prodDe) it.de = prodDe;
   if (brand) it.brand = brand;
+  if (c.gtin && !it.barcode) it.barcode = c.gtin;
   const prevOffer = it.offer || {};
   const now = Date.now();
   it.offer = {

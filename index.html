@@ -49,12 +49,26 @@
   <div class="bs-search-wrap">
     <input id="bsSearch" type="search" placeholder="Keresés…" autocomplete="off" enterkeyhint="search">
   </div>
+  <div class="bs-pref" id="bsPrefBar" hidden>
+    <div class="bs-pref-modes" role="group" aria-label="Rendezés módja">
+      <button type="button" class="bs-pref-btn" id="bsPrefPrice" data-pref-mode="price" aria-pressed="true">Ár szerint</button>
+      <button type="button" class="bs-pref-btn" id="bsPrefStore" data-pref-mode="store" aria-pressed="false">Bolt szerint</button>
+    </div>
+    <label class="bs-pref-store-wrap" id="bsPrefStoreWrap" hidden>
+      <span>Kedvenc bolt</span>
+      <select id="bsPrefStoreSelect" aria-label="Kedvenc bolt"></select>
+    </label>
+  </div>
   <div id="bsSearchResults" class="bs-sec" hidden>
     <div class="bs-label">Találatok</div>
     <div class="bs-results" id="bsResults"></div>
     <div class="bs-hint" id="bsSearchHint" hidden>folytatás gépeléssel pontosítasz</div>
   </div>
   <div id="bsTwoStep">
+    <div class="bs-sec" id="bsOffersSec" hidden>
+      <div class="bs-label" id="bsOffersLabel">Bolti ajánlatok</div>
+      <div class="bs-offers" id="bsOffers"></div>
+    </div>
     <div class="bs-sec">
       <div class="bs-label">Márka</div>
       <div class="bs-chips" id="bsBrands"></div>
@@ -125,6 +139,7 @@
     <button type="button" class="mitem" id="mAccount"><b id="mAccountTitle">Bejelentkezés Google-lel</b><span id="mAccountSub">listák szinkronizálása az eszközeid között</span></button>
     <button type="button" class="mitem" id="mTheme"><b>Megjelenés</b><span id="mThemeSub"></span></button>
     <button type="button" class="mitem" id="mPlace"><b>Vásárlási hely</b><span id="mPlaceSub"></span></button>
+    <button type="button" class="mitem" id="mSortPref"><b>Rendezés (ár / bolt)</b><span id="mSortPrefSub"></span></button>
     <button type="button" class="mitem" id="mHistory"><b>Korábbi tételek</b><span>törölt tételek visszahívása egy koppintással</span></button>
     <button type="button" class="mitem" id="mImport"><b>Lista importálása</b><span>régi lista beillesztése vagy fájlból</span></button>
     <button type="button" class="mitem" id="mBackup"><b>Biztonsági mentés</b><span>a lista fájlba vagy megosztásba (pl. magadnak Telegramon)</span></button>
@@ -152,6 +167,27 @@
     <div class="edbtns"><span class="grow"></span>
       <button class="ghost" id="placeCancel" type="button">Mégse</button>
       <button class="primary" type="submit">Mentés</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="sortPrefDialog" aria-labelledby="spTitle">
+  <form id="sortPrefForm">
+    <h2 id="spTitle" tabindex="-1" autofocus>Rendezés (ár / bolt)</h2>
+    <div class="th-section">
+      <span class="ld-label">Rendezési preferencia</span>
+      <div class="mode-switch" role="group" aria-label="Rendezési preferencia">
+        <button type="button" class="mode-btn" id="spModePrice" data-sp-mode="price" aria-pressed="true">Ár szerint</button>
+        <button type="button" class="mode-btn" id="spModeStore" data-sp-mode="store" aria-pressed="false">Bolt szerint</button>
+      </div>
+    </div>
+    <label id="spStoreWrap" hidden>Kedvenc bolt
+      <select id="spStore"></select>
+    </label>
+    <p class="note">Ár szerint: mindig a legolcsóbb ajánlat kerül felülre. Bolt szerint: a kedvenc bolt termékei és árai kerülnek előre, a többi ár szerint követi.</p>
+    <div class="edbtns"><span class="grow"></span>
+      <button class="ghost" id="spCancel" type="button">Mégse</button>
+      <button class="primary" id="spSave" type="submit">Mentés</button>
     </div>
   </form>
 </dialog>

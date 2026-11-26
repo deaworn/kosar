@@ -1,6 +1,9 @@
 // Pure helpers for the Brand -> Type bottom sheet chooser.
 // Works with the Hungarian Open Food Facts catalog (HU) and existing
 // item candidates/variants (DE/AT), with no network or DOM dependencies.
+import { canonicalGtin, mergeCandidatesByGtin, orderCandidateStores } from './candidates.js';
+import { normalizeSortPref, storeMatchesPref } from './sort-pref.js';
+import { splitBrand } from './brand.js';
 
 export const foldHu = (value) => String(value ?? '')
   .toLowerCase()
@@ -168,26 +171,136 @@ export function matchCatalogProducts(catalog, itemName, exclusionsMap = WORD_EXC
 
 /**
  * Collects product-like entries from an item's existing candidates/variants (for DE/AT).
+ * Preserves GTIN and the underlying candidate (including merged multi-store `stores`)
+ * so the brand/type chooser can display unified multi-store prices and honor sort preferences.
  * @param {any} it
  * @param {any[]} [candidates]
  */
 export function candidatesToProducts(it, candidates = []) {
   const raw = [];
+  const withStore = [];
+  const withoutStore = [];
   for (const c of candidates || []) {
-    if (c && c.name) raw.push({ gtin: '', name: c.name, brand: c.brand || '', quantity: c.unit || '', source: c });
+    if (!c || !c.name) continue;
+    if (c.store && Number(c.price) > 0) withStore.push(c);
+    else withoutStore.push(c);
+  }
+  const merged = mergeCandidatesByGtin(withStore);
+  for (const c of merged) {
+    raw.push({
+      gtin: c.gtin || '',
+      name: c.name,
+      brand: c.brand || '',
+      quantity: c.unit || '',
+      source: c,
+      candidate: c,
+    });
+  }
+  for (const c of withoutStore) {
+    raw.push({
+      gtin: c.gtin || '',
+      name: c.name,
+      brand: c.brand || '',
+      quantity: c.unit || '',
+      source: c,
+      candidate: null,
+    });
   }
   for (const v of it?.offer?.variants || []) {
-    if (v && v.name) raw.push({ gtin: '', name: v.name, brand: it.brand || '', quantity: v.unit || '', source: v });
+    if (v && v.name) raw.push({ gtin: '', name: v.name, brand: it.brand || '', quantity: v.unit || '', source: v, candidate: null });
   }
   const seen = new Set();
   const out = [];
   for (const p of raw) {
-    const key = [foldHu(p.brand), foldHu(p.name), foldHu(p.quantity)].join('|');
+    const cg = canonicalGtin(p.gtin);
+    const key = cg ? 'gtin:' + cg : [foldHu(p.brand), foldHu(p.name), foldHu(p.quantity)].join('|');
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(p);
   }
   return out;
+}
+
+function inferCandidateBrand(c, learned = []) {
+  const direct = extractPrimaryBrand(c?.brand);
+  if (direct) return direct;
+  const sb = splitBrand(c?.name || '', learned);
+  if (sb?.brand) return extractPrimaryBrand(sb.brand);
+  const firstWord = String(c?.name || '').trim().split(/\s+/)[0] || '';
+  if (firstWord && /^(tesco|spar|s-budget|auchan|lidl|pilos|mizo|riska|magyar|ceres|tolle|milfina|alpro|danone)$/i.test(firstWord)) {
+    return extractPrimaryBrand(firstWord);
+  }
+  return extractPrimaryBrand(c?.store || '');
+}
+
+/**
+ * Enriches catalog products (e.g. HU OFF catalog) with verified store candidates
+ * by matching canonical GTIN, and appends unmatched store candidates so multi-store
+ * GTIN cards and price/store sorting work inside the Brand -> Type sheet.
+ */
+export function enrichProductsWithCandidates(products, candidates = [], learned = []) {
+  const mergedCands = mergeCandidatesByGtin(candidates || [], learned);
+  const byGtin = new Map();
+  for (const c of mergedCands) {
+    const cg = canonicalGtin(c.gtin);
+    if (cg && !byGtin.has(cg)) byGtin.set(cg, c);
+  }
+  const usedGtins = new Set();
+  const out = [];
+  for (const p of products || []) {
+    if (!p || !p.name) continue;
+    const cg = canonicalGtin(p.gtin);
+    const cand = cg ? byGtin.get(cg) || null : null;
+    if (cand) usedGtins.add(cg);
+    out.push(cand ? { ...p, candidate: cand, source: p.source || cand } : p);
+  }
+  for (const c of mergedCands) {
+    const cg = canonicalGtin(c.gtin);
+    if (cg && usedGtins.has(cg)) continue;
+    out.push({
+      gtin: c.gtin || '',
+      name: c.name,
+      brand: inferCandidateBrand(c, learned),
+      quantity: c.unit || '',
+      source: c,
+      candidate: c,
+    });
+  }
+  return out;
+}
+
+function candidateEffectivePrice(cand, pref) {
+  if (!cand) return { hasPrice: false, hasFav: false, unitPrice: Infinity, price: Infinity };
+  const ordered = orderCandidateStores(cand, pref);
+  const wantFav = Boolean(pref?.mode === 'store' && pref.store);
+  const fav = wantFav ? ordered.find((s) => s.isFavorite) || null : null;
+  const eff = fav || ordered[0] || cand;
+  return {
+    hasPrice: true,
+    hasFav: Boolean(fav) || (wantFav && storeMatchesPref(cand.store, pref.store)),
+    unitPrice: eff.unitPrice != null ? eff.unitPrice : Infinity,
+    price: Number.isFinite(eff.price) ? eff.price : Infinity,
+  };
+}
+
+function compareTypesWithPref(a, b, pref) {
+  if (!pref) {
+    return typeSortRank(a.label) - typeSortRank(b.label)
+      || a.label.localeCompare(b.label, 'hu')
+      || a.quantity.localeCompare(b.quantity, 'hu');
+  }
+  const wantFav = Boolean(pref.mode === 'store' && pref.store);
+  const pa = candidateEffectivePrice(a.candidate, pref);
+  const pb = candidateEffectivePrice(b.candidate, pref);
+  if (wantFav && pa.hasFav !== pb.hasFav) return pa.hasFav ? -1 : 1;
+  if (pa.hasPrice !== pb.hasPrice) return pa.hasPrice ? -1 : 1;
+  if (pa.hasPrice && pb.hasPrice) {
+    if (pa.unitPrice !== pb.unitPrice) return pa.unitPrice - pb.unitPrice;
+    if (pa.price !== pb.price) return pa.price - pb.price;
+  }
+  return typeSortRank(a.label) - typeSortRank(b.label)
+    || a.label.localeCompare(b.label, 'hu')
+    || a.quantity.localeCompare(b.quantity, 'hu');
 }
 
 const PLAIN_MILK_TOKENS = new Set(['tej', 'uht', 'esl', 'l', 'liter']);
@@ -208,12 +321,15 @@ function typeSortRank(label) {
 
 /**
  * Groups matched products by brand, ordered most-frequent first (tie-break: A-Z),
- * with each brand's deduplicated, normalised, and sorted type labels (brand prefix stripped).
- * @param {Array<{ gtin?: string, name: string, brand: string, quantity?: string, source?: any }>} products
- * @returns {Array<{ brand: string, count: number, types: Array<{ label: string, quantity: string, gtin: string, fullName: string, source: any }> }>}
+ * or ordered by `sortPref` when verified candidate prices/stores are attached:
+ * - `'store'` mode: brands/types available at the favorite store sort first.
+ * - `'price'` mode: priced types sort cheapest first ahead of unpriced catalog entries.
+ * @param {Array<{ gtin?: string, name: string, brand: string, quantity?: string, source?: any, candidate?: any }>} products
+ * @param {{ sortPref?: { mode: string, store: string } | null }} [options]
  */
-export function groupProductsByBrand(products) {
+export function groupProductsByBrand(products, { sortPref = null } = {}) {
   if (!Array.isArray(products) || !products.length) return [];
+  const pref = sortPref ? normalizeSortPref(sortPref) : null;
   const groups = new Map();
 
   for (const p of products) {
@@ -235,48 +351,72 @@ export function groupProductsByBrand(products) {
     const label = normalizeTypeLabel(stripBrandPrefix(p.name, g.brand));
     const qty = normalizeQuantity(p.quantity);
     const gtin = String(p.gtin ?? '').trim();
+    const cg = canonicalGtin(gtin);
     const typeKey = foldHu(label) + '|' + foldHu(qty);
+    const gtinKey = cg ? 'gtin:' + cg : '';
     const entry = {
       label,
       quantity: qty,
       gtin,
       fullName: p.name,
       source: p.source || null,
+      candidate: p.candidate || null,
     };
-    const existing = g.seenTypes.get(typeKey);
+    const existing = g.seenTypes.get(typeKey) || (gtinKey ? g.seenTypes.get(gtinKey) : null);
     if (!existing) {
       g.seenTypes.set(typeKey, entry);
+      if (gtinKey) g.seenTypes.set(gtinKey, entry);
       g.types.push(entry);
-    } else if (!existing.gtin && gtin) {
-      Object.assign(existing, entry);
+    } else {
+      if (gtinKey && !g.seenTypes.has(gtinKey)) g.seenTypes.set(gtinKey, existing);
+      if (!existing.gtin && gtin) existing.gtin = gtin;
+      if (!existing.candidate && entry.candidate) existing.candidate = entry.candidate;
+      if (!existing.source && entry.source) existing.source = entry.source;
+      if (existing.candidate && entry.candidate && existing.candidate !== entry.candidate) {
+        const [merged] = mergeCandidatesByGtin([existing.candidate, entry.candidate]);
+        if (merged) existing.candidate = merged;
+      }
     }
   }
 
-  return [...groups.values()]
-    .map(({ brand, count, types }) => ({
-      brand,
-      count,
-      types: types.sort((a, b) =>
-        typeSortRank(a.label) - typeSortRank(b.label)
-        || a.label.localeCompare(b.label, 'hu')
-        || a.quantity.localeCompare(b.quantity, 'hu')
-      ),
-    }))
-    .sort((a, b) => b.count - a.count || a.brand.localeCompare(b.brand, 'hu'));
+  const wantFav = Boolean(pref?.mode === 'store' && pref.store);
+  const result = [...groups.values()].map(({ brand, count, types }) => {
+    const sortedTypes = types.sort((a, b) => compareTypesWithPref(a, b, pref));
+    const hasFav = wantFav && sortedTypes.some((t) => candidateEffectivePrice(t.candidate, pref).hasFav);
+    const priced = sortedTypes.map((t) => candidateEffectivePrice(t.candidate, pref)).filter((x) => x.hasPrice);
+    const bestUnit = priced.length ? Math.min(...priced.map((x) => x.unitPrice)) : Infinity;
+    const bestPrice = priced.length ? Math.min(...priced.map((x) => x.price)) : Infinity;
+    return { brand, count, types: sortedTypes, _hasFav: hasFav, _hasPrice: priced.length > 0, _bestUnit: bestUnit, _bestPrice: bestPrice };
+  });
+
+  result.sort((a, b) => {
+    if (pref) {
+      if (wantFav && a._hasFav !== b._hasFav) return a._hasFav ? -1 : 1;
+      if (a._hasPrice !== b._hasPrice) return a._hasPrice ? -1 : 1;
+      if (a._hasPrice && b._hasPrice) {
+        if (a._bestUnit !== b._bestUnit) return a._bestUnit - b._bestUnit;
+        if (a._bestPrice !== b._bestPrice) return a._bestPrice - b._bestPrice;
+      }
+    }
+    return b.count - a.count || a.brand.localeCompare(b.brand, 'hu');
+  });
+
+  return result.map(({ brand, count, types }) => ({ brand, count, types }));
 }
 
 /**
  * Searches a product catalog (HU Open Food Facts index or DE/AT candidate products)
  * by accent-insensitive, whole-word/prefix and mid-string matching.
  * Ranking order: exact (0) > prefix (1) > word-prefix (2) > contains (3).
- *
- * @param {Array<{ gtin?: string, name: string, brand?: string, quantity?: string, normalizedName?: string, tokens?: string[], source?: any }>} catalog
- * @param {string} query
- * @param {{ limit?: number }} [options]
- * @returns {Array<{ gtin: string, name: string, brand: string, quantity: string, label: string, source: any }>}
+ * When `candidates` and/or `sortPref` are supplied, matching GTINs are enriched with
+ * multi-store offers and sorted according to `sortPref` (favorite store first in 'store' mode,
+ * cheapest priced offers first in 'price' mode).
  */
-export function searchBrandSheetCatalog(catalog, query, { limit = 30 } = {}) {
-  if (!Array.isArray(catalog) || !catalog.length) return [];
+export function searchBrandSheetCatalog(catalog, query, { limit = 30, candidates = null, sortPref = null, learned = [] } = {}) {
+  const pool = Array.isArray(candidates) && candidates.length
+    ? enrichProductsWithCandidates(catalog || [], candidates, learned)
+    : (Array.isArray(catalog) ? catalog : []);
+  if (!pool.length) return [];
   const raw = String(query ?? '').trim();
   const normalized = foldHu(raw);
   if (!normalized) return [];
@@ -285,10 +425,12 @@ export function searchBrandSheetCatalog(catalog, query, { limit = 30 } = {}) {
   if (!qWords.length) return [];
 
   const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 30;
-  const barcode = /^\d{8,14}$/.test(raw) ? raw.padStart(14, '0') : '';
+  const barcode = /^\d{8,14}$/.test(raw) ? canonicalGtin(raw) : '';
+  const pref = sortPref ? normalizeSortPref(sortPref) : null;
+  const wantFav = Boolean(pref?.mode === 'store' && pref.store);
   const matches = [];
 
-  for (const row of catalog) {
+  for (const row of pool) {
     if (!row || !row.name) continue;
     const gtin = String(row.gtin ?? '').trim();
     const normName = row.normalizedName || foldHu(row.name);
@@ -303,7 +445,7 @@ export function searchBrandSheetCatalog(catalog, query, { limit = 30 } = {}) {
       : normName;
 
     let rank = -1;
-    if (barcode && gtin === barcode) {
+    if (barcode && canonicalGtin(gtin) === barcode) {
       rank = 0;
     } else if (normName === normalized || combined === normalized || normBrand === normalized) {
       rank = 0;
@@ -318,11 +460,21 @@ export function searchBrandSheetCatalog(catalog, query, { limit = 30 } = {}) {
     if (rank >= 0) matches.push({ row, rank });
   }
 
-  matches.sort((a, b) =>
-    a.rank - b.rank
-    || a.row.name.length - b.row.name.length
-    || a.row.name.localeCompare(b.row.name, 'hu')
-  );
+  matches.sort((a, b) => {
+    if (pref) {
+      const pa = candidateEffectivePrice(a.row.candidate, pref);
+      const pb = candidateEffectivePrice(b.row.candidate, pref);
+      if (wantFav && pa.hasFav !== pb.hasFav) return pa.hasFav ? -1 : 1;
+      if (pa.hasPrice !== pb.hasPrice) return pa.hasPrice ? -1 : 1;
+      if (pa.hasPrice && pb.hasPrice) {
+        if (pa.unitPrice !== pb.unitPrice) return pa.unitPrice - pb.unitPrice;
+        if (pa.price !== pb.price) return pa.price - pb.price;
+      }
+    }
+    return a.rank - b.rank
+      || a.row.name.length - b.row.name.length
+      || a.row.name.localeCompare(b.row.name, 'hu');
+  });
 
   return matches.slice(0, cap).map(({ row }) => {
     const brand = extractPrimaryBrand(row.brand);
@@ -333,6 +485,7 @@ export function searchBrandSheetCatalog(catalog, query, { limit = 30 } = {}) {
       quantity: normalizeQuantity(row.quantity),
       label: normalizeTypeLabel(stripBrandPrefix(row.name, brand)),
       source: row.source || null,
+      ...(row.candidate ? { candidate: row.candidate } : {}),
     };
   });
 }

@@ -8,6 +8,7 @@ import { putPhoto, getPhoto, delPhoto, allPhotos, resizeImage, blobToDataUrl, da
 import * as scanner from './scanner.js';
 import * as ai from './ai.js';
 import { COUNTRIES, DEFAULT_PLACE, normalizePlace, placeKey, useItemPlace } from './shopping-place.js';
+import { DEFAULT_SORT_PREF, normalizeSortPref, storesForPreference, sortPrefLabel } from './sort-pref.js';
 import { parseAiInput, isStandalone, isSafari, chooseKeyBanner, keyStatusText } from './ai-key.js';
 import { selectMissing } from './refresh.js';
 import { guessLang } from './lang.js';
@@ -15,7 +16,7 @@ import { chosenVariant, shortName } from './variants.js';
 import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
-import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, ownItemTips, pickCandidate, sortCandidates } from './candidates.js';
+import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, orderCandidateStores, ownItemTips, pickCandidate, pickStoreFromCandidate, sortCandidates } from './candidates.js';
 import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, normalizeListPlace, resolveListPlace, migrateToLists, applyListResets, addIncomingList, reorderLists, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
 import { DEFAULT_MODE, DEFAULT_ACCENT, getAccent, isAccentAvailable, resolveAccentId, accentsForMode, accentCssVars, accentSwatchStyle } from './accents.js';
 import { FIREBASE_CONFIG } from './sync/config.js';
@@ -23,7 +24,7 @@ import { createFirebaseProvider } from './sync/firebase-provider.js';
 import { createAccountSyncManager, createFirebaseAccountProvider } from './sync/account-sync.js';
 import { isValidShareId } from './sync/provider.js';
 import { mergeSharedState, normalizeSharedItem } from './sync/merge.js';
-import { WORD_EXCLUSIONS, candidatesToProducts, foldHu, groupProductsByBrand, matchCatalogProducts, searchBrandSheetCatalog } from './brand-chooser.js';
+import { WORD_EXCLUSIONS, candidatesToProducts, enrichProductsWithCandidates, foldHu, groupProductsByBrand, matchCatalogProducts, searchBrandSheetCatalog } from './brand-chooser.js';
 import { reorderOrMoveItem } from './drag-order.js';
 import { parseDeepLink, buildDeepLink, stripDeepLinkFromUrl } from './deep-link.js';
 
@@ -56,6 +57,25 @@ const LS_PLACE = 'bv.shoppingPlace';
 let settings = null;
 try { const raw = localStorage.getItem(LS_PLACE); if (raw) settings = normalizePlace(JSON.parse(raw)); } catch { /* default */ }
 let shoppingPlace = settings || DEFAULT_PLACE;
+const LS_SORT_PREF = 'bv.sortPref';
+let sortPref = { ...DEFAULT_SORT_PREF };
+try {
+  const rawSort = localStorage.getItem(LS_SORT_PREF);
+  if (rawSort) {
+    const parsed = normalizeSortPref(JSON.parse(rawSort));
+    if (parsed) sortPref = parsed;
+  }
+} catch { /* default */ }
+function saveSortPref(next) {
+  const norm = normalizeSortPref(next);
+  if (!norm) return false;
+  sortPref = norm;
+  try { localStorage.setItem(LS_SORT_PREF, JSON.stringify(sortPref)); } catch { /* storage blocked */ }
+  render();
+  renderSuggest();
+  if ($('brandSheet')?.open) renderBrandSheet();
+  return true;
+}
 const listById = (id) => lists.find((x) => x.id === id) || lists[0] || null;
 const listPlace = (list) => resolveListPlace(list, shoppingPlace);
 const itemPlace = (it) => listPlace(listById(it?.list));
@@ -490,25 +510,56 @@ function metaHtml(it) {
 const expandedChoosers = new Set();
 
 function chooserSummaryText(count, open) {
-  return count + ' ajánlat egységár szerint – ' + (open ? 'elrejtés' : 'koppints a választáshoz');
+  const modeLabel = sortPref.mode === 'store' && sortPref.store
+    ? sortPref.store + ' előre'
+    : 'egységár szerint';
+  return count + ' ajánlat (' + modeLabel + ') – ' + (open ? 'elrejtés' : 'koppints a választáshoz');
+}
+
+function candidateCardHtml(c, idx, lp, pref, { attr = 'data-i', act = '', storeAttr = 'data-si' } = {}) {
+  const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
+  const actAttr = act ? ' data-act="' + esc(act) + '"' : '';
+  const storeRows = orderCandidateStores(c, pref);
+  if (storeRows.length > 1) {
+    const unitHint = c.unit ? '<span class="cand-card-unit">' + esc(c.unit) + '</span>' : '';
+    const rowsHtml = storeRows.map((s, si) => {
+      const cls = 'cand-store-row' + (s.isCheapest ? ' is-cheapest' : '') + (s.isFavorite ? ' is-fav' : '');
+      const favBadge = s.isFavorite ? '<span class="cbadge cbadge-fav">kedvenc bolt</span>' : '';
+      const bestBadge = s.isCheapest ? '<span class="cbadge cbadge-best">legolcsóbb</span>' : '';
+      const scope = shopScope(s);
+      const scopeHtml = scope ? '<span class="cs-scope">' + esc(scope.replace(/^\s*·\s*/, '')) + '</span>' : '';
+      const unitTxt = s.unitPriceText || candidateUnitInfo(s);
+      return '<button type="button" class="' + cls + '"' + actAttr + ' ' + attr + '="' + idx + '" ' + storeAttr + '="' + si + '">' +
+        '<span class="cs-left"><b class="cs-store">' + esc(s.store + (s.online ? ' (online)' : '')) + '</b>' + favBadge + bestBadge + scopeHtml + '</span>' +
+        '<span class="cs-right">' + (unitTxt ? '<span class="cs-unit">' + esc(unitTxt) + '</span>' : '') + '<b class="cs-price">' + esc(eur(s.price, lp)) + '</b></span>' +
+        '</button>';
+    }).join('');
+    return '<div class="cand-card" data-gtin="' + esc(c.gtin || '') + '">' +
+      '<div class="cand-card-head">' + img +
+      '<div class="cand-card-info"><span class="cand-card-title">' + esc(candidateTitle(c)) + '</span>' + unitHint + '</div>' +
+      '<span class="cand-card-count">' + storeRows.length + ' bolt</span></div>' +
+      '<div class="cand-stores">' + rowsHtml + '</div></div>';
+  }
+  const s = storeRows[0] || c;
+  const st = s.store + (s.online ? ' (online)' : '') + shopScope(s);
+  const sub = candidateUnitInfo(s);
+  const favBadge = s.isFavorite ? ' <span class="cbadge cbadge-fav">kedvenc bolt</span>' : '';
+  return '<button type="button" class="cand' + (s.isFavorite ? ' is-fav' : '') + '"' + actAttr + ' ' + attr + '="' + idx + '">' + img +
+    '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(st) + '</b>' + favBadge + ' <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
+    (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
+    '<span class="cprice">' + esc(eur(s.price, lp)) + '</span></button>';
 }
 
 function chooserListHtml(cs, lp) {
-  return '<div class="chooser" role="group" aria-label="Termékválasztó">' + cs.map((c, i) => {
-    const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
-    const st = c.store + (c.online ? ' (online)' : '') + shopScope(c);
-    const sub = candidateUnitInfo(c);
-    return '<button type="button" class="cand" data-act="pick" data-i="' + i + '">' + img +
-      '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(st) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
-      (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
-      '<span class="cprice">' + esc(eur(c.price, lp)) + '</span></button>';
-  }).join('') + '</div>';
+  return '<div class="chooser" role="group" aria-label="Termékválasztó">' +
+    cs.map((c, i) => candidateCardHtml(c, i, lp, sortPref, { attr: 'data-i', act: 'pick' })).join('') +
+    '</div>';
 }
 
 function chooserHtml(it) {
   const lp = itemPlace(it);
   if (lp === 'none') return '';
-  const cs = activeCandidates(it);
+  const cs = activeCandidates(it, sortPref);
   if (!cs.length) {
     expandedChoosers.delete(it.id);
     return '';
@@ -528,7 +579,7 @@ function toggleChooser(id) {
   if (!it) return;
   const lp = itemPlace(it);
   if (lp === 'none') return;
-  const cs = activeCandidates(it);
+  const cs = activeCandidates(it, sortPref);
   if (!cs.length) { expandedChoosers.delete(id); return; }
   const open = !expandedChoosers.has(id);
   if (open) expandedChoosers.add(id);
@@ -755,11 +806,15 @@ $('list').addEventListener('click', (ev) => {
   else if (btn.dataset.act === 'zoom') openZoom(pics(it));
   else if (btn.dataset.act === 'toggle-chooser') toggleChooser(id);
   else if (btn.dataset.act === 'pick') {
-    const c = activeCandidates(it)[Number(btn.dataset.i)];
-    if (c && pickCandidate(it, c, learned(), BRAND_KEYS)) {
+    const c = activeCandidates(it, sortPref)[Number(btn.dataset.i)];
+    const si = btn.dataset.si !== undefined ? Number(btn.dataset.si) : -1;
+    const picked = c && si >= 0
+      ? pickStoreFromCandidate(c, orderCandidateStores(c, sortPref)[si])
+      : c;
+    if (picked && pickCandidate(it, picked, learned(), BRAND_KEYS)) {
       expandedChoosers.delete(id);
       persist(); render();
-      setStatus('Kiválasztva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
+      setStatus('Kiválasztva: ' + [it.brand, it.de || it.hu, picked.store].filter(Boolean).join(' · '));
     }
   } else openBrandSheet(id);
 });
@@ -1084,18 +1139,31 @@ let brandSheetMore = false;
 let brandSheetCustom = false;
 let brandSheetSearchTimer = null;
 let brandSheetSearchResults = [];
+let brandSheetOffers = [];
 const BRAND_CHIP_LIMIT = 12;
 const BRAND_SEARCH_LIMIT = 30;
+
+function itemOfferCandidates(it) {
+  const lp = itemPlace(it);
+  if (lp === 'none') return [];
+  const raw = it?.offer?.candidates;
+  if (!Array.isArray(raw) || !raw.length) return [];
+  return sortCandidates(raw, learned(), sortPref);
+}
 
 function getBrandSheetGroups(it) {
   const lp = itemPlace(it);
   if (lp === 'none') return [];
+  const offerCands = itemOfferCandidates(it);
   if (lp.country === 'hu') {
-    const products = matchCatalogProducts(huCatalog, it.hu || it.de || '', WORD_EXCLUSIONS);
-    return groupProductsByBrand(products);
+    const catalogMatches = matchCatalogProducts(huCatalog, it.hu || it.de || '', WORD_EXCLUSIONS);
+    const products = offerCands.length
+      ? enrichProductsWithCandidates(catalogMatches, offerCands, learned())
+      : catalogMatches;
+    return groupProductsByBrand(products, offerCands.length ? { sortPref } : {});
   }
-  const products = candidatesToProducts(it, activeCandidates(it));
-  return groupProductsByBrand(products);
+  const products = candidatesToProducts(it, offerCands.length ? offerCands : activeCandidates(it, sortPref));
+  return groupProductsByBrand(products, offerCands.length ? { sortPref } : {});
 }
 
 function applyBrandSheetPick(it, pick) {
@@ -1110,6 +1178,41 @@ function applyBrandSheetPick(it, pick) {
   setStatus('Kiválasztva: ' + [patch.brand, patch.type].filter(Boolean).join(' · '));
 }
 
+function applyBrandSheetCandidatePick(it, cand, storeIndex = -1) {
+  if (!it || !cand) return;
+  const picked = storeIndex >= 0
+    ? pickStoreFromCandidate(cand, orderCandidateStores(cand, sortPref)[storeIndex])
+    : cand;
+  if (!picked || !pickCandidate(it, picked, learned(), BRAND_KEYS)) return;
+  expandedChoosers.delete(it.id);
+  queueItemSync(it);
+  persist();
+  render();
+  $('brandSheet').close();
+  setStatus('Kiválasztva: ' + [it.brand, it.de || it.hu, picked.store].filter(Boolean).join(' · '));
+}
+
+function renderBrandSheetPrefBar(lp, offerCands) {
+  const bar = $('bsPrefBar');
+  if (!bar) return;
+  const show = lp !== 'none';
+  bar.hidden = !show;
+  if (!show) return;
+  $('bsPrefPrice').setAttribute('aria-pressed', String(sortPref.mode !== 'store'));
+  $('bsPrefStore').setAttribute('aria-pressed', String(sortPref.mode === 'store'));
+  const storeList = storesForPreference(lp.country, offerCands);
+  const sel = $('bsPrefStoreSelect');
+  sel.innerHTML = storeList.map((name) =>
+    '<option value="' + esc(name) + '"' + (name === sortPref.store ? ' selected' : '') + '>' + esc(name) + '</option>'
+  ).join('');
+  if (sortPref.mode === 'store' && !sortPref.store && storeList.length) {
+    sortPref = { mode: 'store', store: storeList[0] };
+    sel.value = storeList[0];
+    try { localStorage.setItem(LS_SORT_PREF, JSON.stringify(sortPref)); } catch { /* blocked */ }
+  }
+  $('bsPrefStoreWrap').hidden = sortPref.mode !== 'store';
+}
+
 function renderBrandSheet() {
   const it = brandSheetId ? items[brandSheetId] : null;
   if (!it) return;
@@ -1120,6 +1223,9 @@ function renderBrandSheet() {
   if (searchWrap) searchWrap.hidden = isNone;
   if (isNone) {
     brandSheetSearchResults = [];
+    brandSheetOffers = [];
+    $('bsPrefBar').hidden = true;
+    $('bsOffersSec').hidden = true;
     $('bsSearchResults').hidden = true;
     $('bsSearchHint').hidden = true;
     $('bsTwoStep').hidden = false;
@@ -1130,6 +1236,8 @@ function renderBrandSheet() {
     return;
   }
   $('bsBrands').closest('.bs-sec').hidden = false;
+  const offerCands = itemOfferCandidates(it);
+  renderBrandSheetPrefBar(lp, offerCands);
 
   const query = $('bsSearch').value.trim();
   if (query) {
@@ -1137,8 +1245,13 @@ function renderBrandSheet() {
     $('bsSearchResults').hidden = false;
     const pool = lp.country === 'hu'
       ? huCatalog
-      : candidatesToProducts(it, activeCandidates(it));
-    const matches = searchBrandSheetCatalog(pool, query, { limit: BRAND_SEARCH_LIMIT + 1 });
+      : candidatesToProducts(it, offerCands.length ? offerCands : activeCandidates(it, sortPref));
+    const matches = searchBrandSheetCatalog(pool, query, {
+      limit: BRAND_SEARCH_LIMIT + 1,
+      candidates: offerCands,
+      sortPref: offerCands.length ? sortPref : null,
+      learned: learned(),
+    });
     const hasMore = matches.length > BRAND_SEARCH_LIMIT;
     brandSheetSearchResults = hasMore ? matches.slice(0, BRAND_SEARCH_LIMIT) : matches;
     $('bsSearchHint').hidden = !hasMore;
@@ -1150,6 +1263,9 @@ function renderBrandSheet() {
       return;
     }
     $('bsResults').innerHTML = brandSheetSearchResults.map((r, i) => {
+      if (r.candidate) {
+        return candidateCardHtml(r.candidate, i, lp, sortPref, { attr: 'data-bs-res-idx', storeAttr: 'data-bs-res-si' });
+      }
       const brandHtml = r.brand ? '<b>' + esc(r.brand) + '</b>' : '';
       const nameText = r.brand ? (r.label || r.name) : r.name;
       const qtyHtml = r.quantity ? '<small>' + esc(r.quantity) + '</small>' : '';
@@ -1163,10 +1279,25 @@ function renderBrandSheet() {
   $('bsSearchHint').hidden = true;
   $('bsTwoStep').hidden = false;
 
+  const curBrandFold = foldHu(it.brand || '');
+  brandSheetOffers = offerCands;
+  const offersSec = $('bsOffersSec');
+  if (offerCands.length && !curBrandFold) {
+    offersSec.hidden = false;
+    $('bsOffersLabel').textContent = sortPref.mode === 'store' && sortPref.store
+      ? 'Bolti ajánlatok (' + sortPref.store + ' előre)'
+      : 'Bolti ajánlatok (legolcsóbb felül)';
+    $('bsOffers').innerHTML = offerCands
+      .map((c, i) => candidateCardHtml(c, i, lp, sortPref, { attr: 'data-bs-offer-idx', storeAttr: 'data-bs-offer-si' }))
+      .join('');
+  } else {
+    offersSec.hidden = true;
+    $('bsOffers').innerHTML = '';
+  }
+
   const groups = getBrandSheetGroups(it);
   const visibleGroups = brandSheetMore ? groups : groups.slice(0, BRAND_CHIP_LIMIT);
   const hasMore = !brandSheetMore && groups.length > BRAND_CHIP_LIMIT;
-  const curBrandFold = foldHu(it.brand || '');
 
   let brandHtml = '<button type="button" class="bs-chip" data-bs-brand="" aria-pressed="' + (!curBrandFold) + '">Bármelyik márka</button>';
   brandHtml += visibleGroups.map((g) => {
@@ -1188,6 +1319,9 @@ function renderBrandSheet() {
     const types = selGroup ? selGroup.types : [];
     const curTypeFold = foldHu(it.type || '');
     let typeHtml = types.map((t, i) => {
+      if (t.candidate) {
+        return candidateCardHtml(t.candidate, i, lp, sortPref, { attr: 'data-bs-type-idx', storeAttr: 'data-bs-type-si' });
+      }
       const sel = curTypeFold && foldHu(t.label) === curTypeFold;
       const text = t.quantity ? t.label + ' · ' + t.quantity : t.label;
       return '<button type="button" class="bs-chip" data-bs-type-idx="' + i + '" aria-pressed="' + sel + '">' + esc(text) + '</button>';
@@ -1206,6 +1340,7 @@ function openBrandSheet(id) {
   brandSheetCustom = false;
   clearTimeout(brandSheetSearchTimer);
   brandSheetSearchResults = [];
+  brandSheetOffers = [];
   $('bsSearch').value = '';
   const lp = itemPlace(it);
   if (lp !== 'none' && lp.country === 'hu' && !huCatalog.length) {
@@ -1216,6 +1351,31 @@ function openBrandSheet(id) {
   renderBrandSheet();
   $('brandSheet').showModal();
 }
+
+for (const btn of [$('bsPrefPrice'), $('bsPrefStore')]) {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.prefMode === 'store' ? 'store' : 'price';
+    const it = brandSheetId ? items[brandSheetId] : null;
+    const lp = it ? itemPlace(it) : shoppingPlace;
+    const country = lp && lp !== 'none' ? lp.country : shoppingPlace.country;
+    const storeList = storesForPreference(country, it ? itemOfferCandidates(it) : []);
+    const store = mode === 'store' ? (sortPref.store || storeList[0] || '') : sortPref.store;
+    saveSortPref({ mode, store });
+  });
+}
+
+$('bsPrefStoreSelect').addEventListener('change', () => {
+  saveSortPref({ mode: 'store', store: $('bsPrefStoreSelect').value });
+});
+
+$('bsOffers').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-bs-offer-idx]');
+  if (!btn || !brandSheetId || !items[brandSheetId]) return;
+  const cand = brandSheetOffers[Number(btn.dataset.bsOfferIdx)];
+  if (!cand) return;
+  const si = btn.dataset.bsOfferSi !== undefined ? Number(btn.dataset.bsOfferSi) : -1;
+  applyBrandSheetCandidatePick(items[brandSheetId], cand, si);
+});
 
 $('bsSearch').addEventListener('input', () => {
   clearTimeout(brandSheetSearchTimer);
@@ -1234,6 +1394,11 @@ $('bsResults').addEventListener('click', (ev) => {
   if (!btn || !brandSheetId || !items[brandSheetId]) return;
   const hit = brandSheetSearchResults[Number(btn.dataset.bsResIdx)];
   if (!hit) return;
+  if (hit.candidate) {
+    const si = btn.dataset.bsResSi !== undefined ? Number(btn.dataset.bsResSi) : -1;
+    applyBrandSheetCandidatePick(items[brandSheetId], hit.candidate, si);
+    return;
+  }
   applyBrandSheetPick(items[brandSheetId], hit);
 });
 
@@ -1268,6 +1433,11 @@ $('bsTypes').addEventListener('click', (ev) => {
   const selGroup = groups.find((g) => foldHu(g.brand) === foldHu(it.brand || ''));
   const t = selGroup?.types?.[Number(btn.dataset.bsTypeIdx)];
   if (!t) return;
+  if (t.candidate) {
+    const si = btn.dataset.bsTypeSi !== undefined ? Number(btn.dataset.bsTypeSi) : -1;
+    applyBrandSheetCandidatePick(it, t.candidate, si);
+    return;
+  }
   applyBrandSheetPick(it, {
     brand: selGroup.brand,
     label: t.label,
@@ -1373,19 +1543,11 @@ function renderSuggest(inp = getActiveAddInput()) {
   const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
   const st = typingCands.getState();
   const match = q.length >= 3 && st.text.toLowerCase() === q;
-  const cands = match ? st.candidates : [];
+  const cands = match ? sortCandidates(st.candidates, learned(), sortPref) : [];
   const matched = match && cands.length ? (st.matched || '') : '';
   const pending = match && st.pending === true && navigator.onLine;
   const headHtml = matched ? '<div class="shead">' + esc(matched) + ':</div>' : '';
-  const candHtml = cands.map((c, i) => {
-    const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
-    const store = c.store + (c.online ? ' (online)' : '') + shopScope(c);
-    const sub = candidateUnitInfo(c);
-    return '<button type="button" class="cand" data-cand="' + i + '">' + img +
-      '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(store) + '</b> <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
-      (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
-      '<span class="cprice">' + esc(eur(c.price, lp)) + '</span></button>';
-  }).join('');
+  const candHtml = cands.map((c, i) => candidateCardHtml(c, i, lp, sortPref, { attr: 'data-cand', storeAttr: 'data-cand-si' })).join('');
   const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
   const catalogHits = lookupHuCatalog(huCatalog, q, lp.country);
   const catalogHtml = catalogHits.length ? '<div class="shead">Konkrét termékek</div>' + catalogHits.map(({ gtin, name, brand, quantity }) => {
@@ -1485,9 +1647,13 @@ $('suggest').addEventListener('click', (ev) => {
   const cbtn = ev.target.closest('button[data-cand]');
   if (cbtn) {
     const st = typingCands.getState();
-    const c = st.candidates[Number(cbtn.dataset.cand)];
+    const sorted = sortCandidates(st.candidates, learned(), sortPref);
+    const base = sorted[Number(cbtn.dataset.cand)];
+    if (!base) return;
+    const si = cbtn.dataset.candSi !== undefined ? Number(cbtn.dataset.candSi) : -1;
+    const c = si >= 0 ? pickStoreFromCandidate(base, orderCandidateStores(base, sortPref)[si]) : base;
     if (!c) return;
-    const it = addWithCandidate(inp?.value || '', c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: st.candidates, matched: st.matched });
+    const it = addWithCandidate(inp?.value || '', c, { id: uid(), learned: learned(), keys: BRAND_KEYS, candidates: sorted, matched: st.matched });
     it.list = lid;
     const lp = listPlace(listById(lid));
     if (lp !== 'none') it.offerPlace = placeKey(lp);
@@ -1585,7 +1751,7 @@ function openEditor(id, d = null) {
   if (id && it.recogSrc) lines.push('Felismerés: ' + esc(it.recogSrc) + ' <span class="est">(javaslat, javítható)</span>');
   if (id && it.alts?.length) lines.push('Más javaslat: ' + it.alts.map((c, i) => '<button type="button" class="ghost take alt" data-i="' + i + '">' + esc(c.hu || c.de) + (c.brand ? ' · ' + esc(c.brand) : '') + '</button>').join(' '));
   const of = id && lp !== 'none' ? it.offer : null;
-  const edCands = of?.candidates?.length ? sortCandidates(of.candidates) : [];
+  const edCands = of?.candidates?.length ? sortCandidates(of.candidates, learned(), sortPref) : [];
   if (edCands.length) lines.push('Bolti ajánlatok (egységár szerint): ' + edCands.map((c, i) => '<button type="button" class="ghost take candpick" data-i="' + i + '">' + esc(c.store + shopScope(c) + ': ' + candidateTitle(c) + ' · ' + eur(c.price, lp) + (c.unitPriceText ? ' (' + c.unitPriceText + ')' : '')) + '</button>').join(' '));
   if (of?.price) lines.push('Ár: <b>' + esc(priceText(of.price, false, lp)) + '</b>' + (of.price.base ? ' · ' + esc(of.price.base) : '') + ' <span class="note">(a bolti oldalról, ' + esc(of.price.date) + ')</span>');
   else if (of) lines.push('Ár: nem találtam <span class="note">(ellenőrizve ' + esc(String(of.checked || '').slice(0, 10)) + ')</span>');
@@ -2069,6 +2235,7 @@ function updateAccountMenuUi() {
 $('menuBtn').addEventListener('click', () => {
   updateAccountMenuUi();
   $('mPlaceSub').textContent = COUNTRIES[shoppingPlace.country].label + ' \u00b7 ' + shoppingPlace.place;
+  $('mSortPrefSub').textContent = sortPrefLabel(sortPref);
   $('mThemeSub').textContent = (themeMode === 'light' ? 'Világos' : 'Sötét') + ' · ' + (getAccent(themeAccent)?.name || '');
   $('mAiKeySub').textContent = keyStatusText(ai.configured());
   $('aiState').textContent = ai.configured() ? 'AI-segéd (gép): ellenőrzés…' : 'AI-segéd (gép): nincs beállítva';
@@ -2163,6 +2330,44 @@ $('placeForm').addEventListener('submit', event => {
   render();
   persist();
   kickOffers();
+});
+let spDraftMode = 'price';
+function renderSortPrefDialog() {
+  $('spModePrice').setAttribute('aria-pressed', String(spDraftMode !== 'store'));
+  $('spModeStore').setAttribute('aria-pressed', String(spDraftMode === 'store'));
+  $('spStoreWrap').hidden = spDraftMode !== 'store';
+}
+function openSortPrefDialog() {
+  spDraftMode = sortPref.mode === 'store' ? 'store' : 'price';
+  const allCands = Object.values(items).flatMap((it) => Array.isArray(it?.offer?.candidates) ? it.offer.candidates : []);
+  const lp = activeAddPlace();
+  const country = lp && lp !== 'none' ? lp.country : shoppingPlace.country;
+  const storeList = storesForPreference(country, allCands);
+  $('spStore').innerHTML = storeList.map((name) =>
+    '<option value="' + esc(name) + '"' + (name === sortPref.store ? ' selected' : '') + '>' + esc(name) + '</option>'
+  ).join('');
+  if (sortPref.store && storeList.includes(sortPref.store)) $('spStore').value = sortPref.store;
+  renderSortPrefDialog();
+  $('sortPrefDialog').showModal();
+}
+$('mSortPref').addEventListener('click', () => { $('menu').close(); openSortPrefDialog(); });
+for (const btn of [$('spModePrice'), $('spModeStore')]) {
+  btn.addEventListener('click', () => {
+    spDraftMode = btn.dataset.spMode === 'store' ? 'store' : 'price';
+    renderSortPrefDialog();
+  });
+}
+$('spCancel').addEventListener('click', () => $('sortPrefDialog').close());
+$('sortPrefForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const next = normalizeSortPref({
+    mode: spDraftMode,
+    store: spDraftMode === 'store' ? $('spStore').value : sortPref.store,
+  });
+  if (!next) return;
+  saveSortPref(next);
+  $('sortPrefDialog').close();
+  setStatus('Rendezés: ' + sortPrefLabel(sortPref));
 });
 $('mAiKey').addEventListener('click', openAiKeyDialog);
 $('mBackup').addEventListener('click', async () => {
@@ -3076,7 +3281,7 @@ if ('serviceWorker' in navigator) {
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloaded) return;
-    if ($('editor').open || $('brandSheet').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('themeDialog').open || $('shareConfirm').open || $('joinConfirm').open) return; // never lose an open form
+    if ($('editor').open || $('brandSheet').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('themeDialog').open || $('sortPrefDialog').open || $('shareConfirm').open || $('joinConfirm').open) return; // never lose an open form
     reloaded = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(() => {});
