@@ -17,6 +17,7 @@ import { mergeOffer } from './offer-merge.js';
 import { nameCheck } from './name-check.js';
 import { unitText } from './units.js';
 import { activeCandidates, addWithCandidate, candidateTitle, candidateUnitInfo, createTypingCandidates, dictionaryTips, orderCandidateStores, ownItemTips, pickCandidate, pickStoreFromCandidate, sortCandidates } from './candidates.js';
+import { buildSuggestModel, renderSuggestHtml } from './suggest.js';
 import { DEFAULT_LIST_ID, DEFAULT_LIST_NAME, normalizeList, normalizeListPlace, resolveListPlace, migrateToLists, applyListResets, addIncomingList, reorderLists, encodeShareList, decodeShareList, normalizeCount, listEstimate } from './lists.js';
 import { DEFAULT_MODE, DEFAULT_ACCENT, getAccent, isAccentAvailable, resolveAccentId, accentsForMode, accentCssVars, accentSwatchStyle } from './accents.js';
 import { FIREBASE_CONFIG } from './sync/config.js';
@@ -516,9 +517,10 @@ function chooserSummaryText(count, open) {
   return count + ' ajánlat (' + modeLabel + ') – ' + (open ? 'elrejtés' : 'koppints a választáshoz');
 }
 
-function candidateCardHtml(c, idx, lp, pref, { attr = 'data-i', act = '', storeAttr = 'data-si' } = {}) {
+function candidateCardHtml(c, idx, lp, pref, { attr = 'data-i', act = '', storeAttr = 'data-si', showAdd = false } = {}) {
   const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
   const actAttr = act ? ' data-act="' + esc(act) + '"' : '';
+  const addChip = showAdd ? '<span class="sug-act sug-add sug-add-sm" aria-hidden="true" title="Azonnali hozzáadás a listához">+</span>' : '';
   const storeRows = orderCandidateStores(c, pref);
   if (storeRows.length > 1) {
     const unitHint = c.unit ? '<span class="cand-card-unit">' + esc(c.unit) + '</span>' : '';
@@ -531,7 +533,7 @@ function candidateCardHtml(c, idx, lp, pref, { attr = 'data-i', act = '', storeA
       const unitTxt = s.unitPriceText || candidateUnitInfo(s);
       return '<button type="button" class="' + cls + '"' + actAttr + ' ' + attr + '="' + idx + '" ' + storeAttr + '="' + si + '">' +
         '<span class="cs-left"><b class="cs-store">' + esc(s.store + (s.online ? ' (online)' : '')) + '</b>' + favBadge + bestBadge + scopeHtml + '</span>' +
-        '<span class="cs-right">' + (unitTxt ? '<span class="cs-unit">' + esc(unitTxt) + '</span>' : '') + '<b class="cs-price">' + esc(eur(s.price, lp)) + '</b></span>' +
+        '<span class="cs-right">' + (unitTxt ? '<span class="cs-unit">' + esc(unitTxt) + '</span>' : '') + '<b class="cs-price">' + esc(eur(s.price, lp)) + '</b>' + addChip + '</span>' +
         '</button>';
     }).join('');
     return '<div class="cand-card" data-gtin="' + esc(c.gtin || '') + '">' +
@@ -547,7 +549,7 @@ function candidateCardHtml(c, idx, lp, pref, { attr = 'data-i', act = '', storeA
   return '<button type="button" class="cand' + (s.isFavorite ? ' is-fav' : '') + '"' + actAttr + ' ' + attr + '="' + idx + '">' + img +
     '<span class="cmain"><span class="ctop"><b class="cstore">' + esc(st) + '</b>' + favBadge + ' <span class="cname">' + esc(candidateTitle(c)) + '</span></span>' +
     (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
-    '<span class="cprice">' + esc(eur(s.price, lp)) + '</span></button>';
+    '<span class="cprice">' + esc(eur(s.price, lp)) + '</span>' + addChip + '</button>';
 }
 
 function chooserListHtml(cs, lp) {
@@ -1512,51 +1514,54 @@ async function loadHuCatalog() {
   return huCatalogLoad;
 }
 let lookupHuCatalog = () => [];
+function ownSuggestMeta(hit, lp) {
+  const h = hit.item;
+  const variant = chosenVariant(h)?.name;
+  const variantName = variant ? shortName(variant, h.brand) : '';
+  let priceSummary = '';
+  if (lp && lp !== 'none') {
+    const p = h.myPrice || h.offer?.price;
+    if (p && Number(p.value) > 0) {
+      priceSummary = [p.store, eur(p.value, lp)].filter(Boolean).join(' ');
+    }
+  }
+  return { variantName, priceSummary };
+}
 function renderSuggest(inp = getActiveAddInput()) {
   const q = (inp?.value || '').trim().toLowerCase();
   const box = $('suggest');
   if (!inp || !inp.isConnected || q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
-  const hits = ownItemTips(q, items, hist);
-  const histHtml = hits.map(({ id, item: h, inList }) => {
-    const variant = chosenVariant(h)?.name;
-    const label = inList && !h.done ? 'A list\u00e1n' : 'Kor\u00e1bbi';
-    return '<button type="button" class="sug" data-own-id="' + esc(id) + '" data-in-list="' + inList + '">'
-      + '<b>' + esc(h.hu || h.de) + '</b><span>'
-      + esc([h.de && h.hu ? h.de : '', h.brand, variant && shortName(variant, h.brand)].filter(Boolean).join(' \u00b7 '))
-      + '</span><i>' + label + '</i></button>';
-  }).join('');
   const lp = activeAddPlace();
-  if (lp === 'none') {
-    box.innerHTML = histHtml;
-    box.hidden = !hits.length;
-    if (!box.hidden) positionSuggest(inp);
-    return;
+  const hits = ownItemTips(q, items, hist);
+  let tips = [];
+  let cands = [];
+  let matched = '';
+  let pending = false;
+  let catalogHits = [];
+  if (lp !== 'none' && !(lp.country === 'hu' && q === 'tej')) {
+    tips = dictionaryTips(q, lp.country);
+    const st = typingCands.getState();
+    const match = q.length >= 3 && st.text.toLowerCase() === q;
+    cands = match ? sortCandidates(st.candidates, learned(), sortPref) : [];
+    matched = match && cands.length ? (st.matched || '') : '';
+    pending = match && st.pending === true && navigator.onLine;
+    catalogHits = lookupHuCatalog(huCatalog, q, lp.country);
   }
-  if (lp.country === 'hu' && q === 'tej') {
-    const plainMilkHtml = '<button type="button" class="sug" data-plain-hu="Tej" data-plain-icon="milk"><b>Tej</b><span>márka és típus a listán választható</span></button>';
-    box.innerHTML = plainMilkHtml + histHtml;
-    box.hidden = false;
-    positionSuggest(inp);
-    return;
-  }
-  const tips = dictionaryTips(q, lp.country);
-  const tipHtml = tips.map(([hu, de], i) => '<button type="button" class="sug" data-tip="' + i + '"><b>' + esc(hu) + '</b><span>' + esc(de) + '</span></button>').join('');
-  const st = typingCands.getState();
-  const match = q.length >= 3 && st.text.toLowerCase() === q;
-  const cands = match ? sortCandidates(st.candidates, learned(), sortPref) : [];
-  const matched = match && cands.length ? (st.matched || '') : '';
-  const pending = match && st.pending === true && navigator.onLine;
-  const headHtml = matched ? '<div class="shead">' + esc(matched) + ':</div>' : '';
-  const candHtml = cands.map((c, i) => candidateCardHtml(c, i, lp, sortPref, { attr: 'data-cand', storeAttr: 'data-cand-si' })).join('');
-  const pendHtml = pending ? '<div class="spending" role="status">keresem...</div>' : '';
-  const catalogHits = lookupHuCatalog(huCatalog, q, lp.country);
-  const catalogHtml = catalogHits.length ? '<div class="shead">Konkrét termékek</div>' + catalogHits.map(({ gtin, name, brand, quantity }) => {
-    const title = brand && !name.toLowerCase().startsWith(brand.toLowerCase()) ? brand + ' · ' + name : name;
-    return '<button type="button" class="sug" data-off-gtin="' + esc(gtin) + '"><b>' + esc(title) + '</b><span>'
-      + esc(quantity || 'Kiszerelés nincs megadva') + '</span><i>Open Food Facts</i></button>';
-  }).join('') : '';
-  box.innerHTML = catalogHtml + histHtml + tipHtml + headHtml + candHtml + pendHtml;
-  box.hidden = !tips.length && !hits.length && !catalogHits.length && !cands.length && !pending;
+  const model = buildSuggestModel({
+    query: q,
+    place: lp,
+    ownHits: hits,
+    dictTips: tips,
+    catalogHits,
+    candidates: cands,
+    matched,
+    pending,
+    getOwnMeta: (hit) => ownSuggestMeta(hit, lp),
+  });
+  box.innerHTML = renderSuggestHtml(model, {
+    renderCandidate: (c, i) => candidateCardHtml(c, i, lp, sortPref, { attr: 'data-cand', storeAttr: 'data-cand-si', showAdd: true }),
+  });
+  box.hidden = model.hidden;
   if (!box.hidden) positionSuggest(inp);
 }
 function suggest(inp = getActiveAddInput()) {
