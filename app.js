@@ -310,6 +310,7 @@ function saveHistory() {
   kvPut('history', hist).catch(() => {});
 }
 function remove(id) {
+  expandedChoosers.delete(id);
   const it = items[id];
   if (it) queueDeleteSync(it.list, id);
   if (it && (it.hu || it.de)) {
@@ -460,7 +461,7 @@ function metaHtml(it) {
     return brand ? '<div class="meta">' + esc(brand) + '</div>' : '';
   }
   const cs = activeCandidates(it);
-  if (cs.length) return '<div class="meta"><span class="note">' + cs.length + ' ajánlat egységár szerint – koppints a választáshoz:</span></div>';
+  if (cs.length) return '';
   const parts = [];
   // a brand only when certain: typed, from the barcode/Claude, or from the verified store page
   const brand = it.brand || it.offer?.link?.brand || '';
@@ -486,11 +487,13 @@ function metaHtml(it) {
   return parts.length ? '<div class="meta">' + parts.join(' · ') + '</div>' : '';
 }
 
-function chooserHtml(it) {
-  const lp = itemPlace(it);
-  if (lp === 'none') return '';
-  const cs = activeCandidates(it);
-  if (!cs.length) return '';
+const expandedChoosers = new Set();
+
+function chooserSummaryText(count, open) {
+  return count + ' ajánlat egységár szerint – ' + (open ? 'elrejtés' : 'koppints a választáshoz');
+}
+
+function chooserListHtml(cs, lp) {
   return '<div class="chooser" role="group" aria-label="Termékválasztó">' + cs.map((c, i) => {
     const img = safeUrl(c.image) ? '<img class="cpic" src="' + esc(c.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '';
     const st = c.store + (c.online ? ' (online)' : '') + shopScope(c);
@@ -500,6 +503,52 @@ function chooserHtml(it) {
       (sub ? '<span class="csub">' + esc(sub) + '</span>' : '') + '</span>' +
       '<span class="cprice">' + esc(eur(c.price, lp)) + '</span></button>';
   }).join('') + '</div>';
+}
+
+function chooserHtml(it) {
+  const lp = itemPlace(it);
+  if (lp === 'none') return '';
+  const cs = activeCandidates(it);
+  if (!cs.length) {
+    expandedChoosers.delete(it.id);
+    return '';
+  }
+  const open = expandedChoosers.has(it.id);
+  return '<div class="chooser-wrap' + (open ? '' : ' collapsed') + '">' +
+    '<button type="button" class="chooser-toggle" data-act="toggle-chooser" aria-expanded="' + open + '">' +
+    '<span class="chooser-summary">' + esc(chooserSummaryText(cs.length, open)) + '</span>' +
+    '<span class="chooser-chev" aria-hidden="true">▾</span>' +
+    '</button>' +
+    (open ? chooserListHtml(cs, lp) : '') +
+    '</div>';
+}
+
+function toggleChooser(id) {
+  const it = items[id];
+  if (!it) return;
+  const lp = itemPlace(it);
+  if (lp === 'none') return;
+  const cs = activeCandidates(it);
+  if (!cs.length) { expandedChoosers.delete(id); return; }
+  const open = !expandedChoosers.has(id);
+  if (open) expandedChoosers.add(id);
+  else expandedChoosers.delete(id);
+  const li = document.querySelector('#list li[data-id="' + CSS.escape(id) + '"]');
+  const wrap = li?.querySelector('.chooser-wrap');
+  if (!wrap) { render(); return; }
+  wrap.classList.toggle('collapsed', !open);
+  const btn = wrap.querySelector('.chooser-toggle');
+  if (btn) {
+    btn.setAttribute('aria-expanded', String(open));
+    const sum = btn.querySelector('.chooser-summary');
+    if (sum) sum.textContent = chooserSummaryText(cs.length, open);
+  }
+  const existing = wrap.querySelector('.chooser');
+  if (open) {
+    if (!existing) wrap.insertAdjacentHTML('beforeend', chooserListHtml(cs, lp));
+  } else if (existing) {
+    existing.remove();
+  }
 }
 
 function rowHtml(it) {
@@ -693,7 +742,10 @@ $('list').addEventListener('click', (ev) => {
   if (!it) return;
   const lid = it.list && lists.some((x) => x.id === it.list) ? it.list : (lists[0]?.id || DEFAULT_LIST_ID);
   if (lid && activeListId !== lid) activeListId = lid;
-  if (btn.dataset.act === 'toggle') edit(id, { done: !it.done });
+  if (btn.dataset.act === 'toggle') {
+    if (!it.done) expandedChoosers.delete(id);
+    edit(id, { done: !it.done });
+  }
   else if (btn.dataset.act === 'dec' || btn.dataset.act === 'inc') {
     const cur = normalizeCount(it.count);
     const next = btn.dataset.act === 'inc' ? Math.min(99, cur + 1) : Math.max(1, cur - 1);
@@ -701,9 +753,11 @@ $('list').addEventListener('click', (ev) => {
   }
   else if (btn.dataset.act === 'delete') { remove(id); setStatus('Törölve: ' + (it.hu || it.de)); }
   else if (btn.dataset.act === 'zoom') openZoom(pics(it));
+  else if (btn.dataset.act === 'toggle-chooser') toggleChooser(id);
   else if (btn.dataset.act === 'pick') {
     const c = activeCandidates(it)[Number(btn.dataset.i)];
     if (c && pickCandidate(it, c, learned(), BRAND_KEYS)) {
+      expandedChoosers.delete(id);
       persist(); render();
       setStatus('Kiválasztva: ' + [it.brand, it.de || it.hu, c.store].filter(Boolean).join(' · '));
     }
@@ -810,7 +864,7 @@ function endDragSession(commit) {
 
 $('list').addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0 || anyOpen() || dragSession || listDragSession) return;
-  if (ev.target.closest('.chk, .stepper, .icobtn, .chooser, .lcard-head, .lcard-new')) return;
+  if (ev.target.closest('.chk, .stepper, .icobtn, .chooser, .chooser-wrap, .lcard-head, .lcard-new')) return;
   const li = ev.target.closest('.lcard-items li[data-id]');
   if (!li || !items[li.dataset.id]) return;
   const rect = li.getBoundingClientRect();
