@@ -27,7 +27,7 @@ import { isValidShareId } from './sync/provider.js';
 import { mergeSharedState, normalizeSharedItem } from './sync/merge.js';
 import { WORD_EXCLUSIONS, candidatesToProducts, enrichProductsWithCandidates, foldHu, groupProductsByBrand, matchCatalogProducts, searchBrandSheetCatalog } from './brand-chooser.js';
 import { reorderOrMoveItem } from './drag-order.js';
-import { parseDeepLink, buildDeepLink, stripDeepLinkFromUrl } from './deep-link.js';
+import { parseDeepLink, buildDeepLink, stripDeepLinkFromUrl, detectInAppBrowser, inAppBrowserHint } from './deep-link.js';
 
 const GROUP_LABEL = { kell: '', havan: 'ha van', otthon: 'ha otthon elfogyott' };
 const CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.2 3L13 4.5" stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -2843,6 +2843,20 @@ async function shareLiveLink(l) {
 
 // ---- multiple lists (create / edit / send / delete / incoming #list=) -------
 let menuListId = null, editingListId = null, pendingShareList = null, pendingJoinShare = null;
+let joinLoading = false, pendingDeepLinkCleanUrl = null, pendingInAppLink = null, inAppBypassed = false;
+
+function consumePendingDeepLinkUrl() {
+  if (!pendingDeepLinkCleanUrl) return;
+  const clean = pendingDeepLinkCleanUrl;
+  pendingDeepLinkCleanUrl = null;
+  try { history.replaceState(null, '', clean); } catch { /* ignore */ }
+}
+
+function maybeOpenShoppingPlaceAfterDeepLink() {
+  if (!settings && !joinLoading && !$('importer').open && !$('shareConfirm').open && !$('joinConfirm').open && !$('inAppGate').open && !$('shoppingPlace').open) {
+    openShoppingPlace();
+  }
+}
 
 function openListMenu(listId) {
   const l = lists.find((x) => x.id === listId);
@@ -2856,11 +2870,20 @@ function openListMenu(listId) {
     : l.shareId
       ? 'meghívó link megosztása'
       : 'valós idejű szinkron másik telefonnal';
+  $('lmCopyLive').hidden = !l.shareId;
   $('lmLeaveLive').hidden = !l.shareId;
   $('lmClearDone').hidden = !hasDone;
   $('lmDelete').hidden = lists.length < 2;
   $('listMenu').showModal();
 }
+$('lmCopyLive').addEventListener('click', async () => {
+  const l = lists.find((x) => x.id === menuListId);
+  $('listMenu').close();
+  if (!l || !l.shareId) return;
+  const link = buildDeepLink(location.href, 'join', l.shareId);
+  const ok = await copyText(link);
+  setStatus(ok ? 'Meghívó link másolva a vágólapra.' : 'A link másolása nem sikerült.');
+});
 $('lmShareLive').addEventListener('click', async () => {
   const l = lists.find((x) => x.id === menuListId);
   $('listMenu').close();
@@ -3147,40 +3170,84 @@ $('jcYes').addEventListener('click', async () => {
   setStatus('Csatlakoztál a közös listához: ' + nl.name);
 });
 
+$('iagCopy').addEventListener('click', async () => {
+  const link = pendingInAppLink?.url || location.href;
+  const ok = await copyText(link);
+  $('iagHint').textContent = ok
+    ? 'Link másolva! Nyisd meg Chrome-ban vagy Safariban, és illeszd be a címsorba.'
+    : 'A másolás nem sikerült – használd a jobb felső ⋯ menüt (Megnyitás külső böngészőben).';
+});
+$('iagContinue').addEventListener('click', () => {
+  inAppBypassed = true;
+  pendingInAppLink = null;
+  $('inAppGate').close();
+  handleDeepLink({ bypassInAppGate: true });
+});
+
 // An import/share/join/ai link carries its payload in the query string (?join=, ?list=, ?import=, ?ai=),
 // with legacy URL fragment (#...) support as a fallback for older links.
-function handleDeepLink() {
+function handleDeepLink({ bypassInAppGate = false } = {}) {
   const link = parseDeepLink(location.search, location.hash);
   if (!link) return;
   const cleanUrl = stripDeepLinkFromUrl(location.pathname, location.search, location.hash, link);
+  const standalone = isStandalone({
+    navigatorStandalone: !!navigator.standalone,
+    displayModeStandalone: !!window.matchMedia?.('(display-mode: standalone)')?.matches,
+  });
+  const inApp = !bypassInAppGate && !inAppBypassed ? detectInAppBrowser(navigator.userAgent, { standalone }) : null;
+  if (inApp && (link.type === 'join' || link.type === 'list' || link.type === 'import' || link.type === 'ai')) {
+    // Keep the deep-link query parameter intact in location.href so tapping
+    // Messenger's "⋯ -> Open in Chrome / external browser" hands off the full link.
+    const copy = inAppBrowserHint(inApp, link.type);
+    pendingInAppLink = { link, url: location.href, cleanUrl };
+    $('iagTitle').textContent = copy.title;
+    $('iagBody').textContent = copy.body;
+    $('iagSteps').textContent = copy.steps;
+    $('iagCopy').textContent = copy.copyLabel;
+    $('iagContinue').textContent = copy.continueLabel;
+    $('iagHint').textContent = '';
+    if (!$('inAppGate').open) $('inAppGate').showModal();
+    return;
+  }
   if (link.type === 'join') {
+    if (joinLoading) return;
     const shareId = link.value;
-    history.replaceState(null, '', cleanUrl);
     if (!isValidShareId(shareId)) {
+      history.replaceState(null, '', cleanUrl);
       setStatus('A közös lista linkje hibás.');
       return;
     }
     const existing = lists.find((x) => x.shareId === shareId);
     if (existing) {
+      history.replaceState(null, '', cleanUrl);
       focusList(existing.id);
       setStatus('Ez a közös lista már megvan: ' + existing.name);
       return;
     }
     if (!FIREBASE_CONFIG) {
+      history.replaceState(null, '', cleanUrl);
       setStatus('A közös lista még nincs beállítva');
       return;
     }
+    // Defer stripping ?join= until the user confirms or cancels joinConfirm, so a
+    // browser hand-off ("Open in Chrome") or reload never loses the invite.
+    pendingDeepLinkCleanUrl = cleanUrl;
+    joinLoading = true;
     (async () => {
       try {
         setStatus('Közös lista betöltése…');
         const prov = await ensureSyncProvider();
         const snapshot = await prov.joinSharedList(shareId);
+        joinLoading = false;
         pendingJoinShare = { shareId, snapshot };
         const name = snapshot.meta?.name || DEFAULT_LIST_NAME;
         $('jcMsg').textContent = name + ' közös lista. Csatlakozol?';
         $('joinConfirm').showModal();
       } catch {
+        joinLoading = false;
+        pendingDeepLinkCleanUrl = null;
         setStatus('A közös lista nem található vagy nincs net.');
+        maybeOpenShoppingPlaceAfterDeepLink();
       }
     })();
     return;
@@ -3197,11 +3264,12 @@ function handleDeepLink() {
   }
   if (link.type === 'list') {
     const parsed = decodeShareList(link.raw);
-    history.replaceState(null, '', cleanUrl);
     if (!parsed) {
+      history.replaceState(null, '', cleanUrl);
       setStatus('A megosztott lista linkje hibás vagy túl nagy.');
       return;
     }
+    pendingDeepLinkCleanUrl = cleanUrl;
     pendingShareList = parsed;
     $('scShareMsg').textContent = parsed.name + ' lista érkezett, ' + parsed.items.length + ' tétel. Hozzáadod?';
     $('shareConfirm').showModal();
@@ -3235,8 +3303,8 @@ function setStatus(t) { $('status').textContent = t || ''; clearTimeout(statusTi
 // ---- lifecycle ------------------------------------------------------------------
 window.addEventListener('online', () => { onlineSince = Date.now(); setNet(); initSharedLists(); ensureAccountSync().then((m) => m?.handleOnline()).catch(() => {}); kickEnrich(); kickRecognize(); kickOffers(); });
 window.addEventListener('offline', () => { setNet(); for (const l of lists) if (l.shareId) syncStates.set(l.shareId, 'offline'); render(); });
-window.addEventListener('hashchange', handleDeepLink); // import link opened while the app is already open
-window.addEventListener('popstate', handleDeepLink);
+window.addEventListener('hashchange', () => handleDeepLink()); // import link opened while the app is already open
+window.addEventListener('popstate', () => handleDeepLink());
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     const res = applyListResets(lists, items);
@@ -3273,10 +3341,11 @@ function review(force = false) {
 setInterval(() => { if (!document.hidden) review(); }, 5 * 60e3);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) review(); });
 render(); setNet(); handleDeepLink(); renderKeyBanners(); initSharedLists(); if (FIREBASE_CONFIG && navigator.onLine) ensureAccountSync().catch(() => {});
-if (!settings && !$("importer").open && !$('shareConfirm').open && !$('joinConfirm').open) openShoppingPlace();
+maybeOpenShoppingPlaceAfterDeepLink();
 // A shared list arriving on a fresh phone asks first; the place question follows once it is answered.
-$('shareConfirm').addEventListener('close', () => { if (!settings) openShoppingPlace(); });
-$('joinConfirm').addEventListener('close', () => { if (!settings) openShoppingPlace(); });
+$('shareConfirm').addEventListener('close', () => { consumePendingDeepLinkUrl(); maybeOpenShoppingPlaceAfterDeepLink(); });
+$('joinConfirm').addEventListener('close', () => { consumePendingDeepLinkUrl(); maybeOpenShoppingPlaceAfterDeepLink(); });
+$('inAppGate').addEventListener('close', () => { if (!inAppBypassed) maybeOpenShoppingPlaceAfterDeepLink(); });
 loadDurable().then(() => { kickEnrich(); return loadPhotos(); }).then(() => { takeShared(); kickRecognize(); review(true); });
 
 if ('serviceWorker' in navigator) {
@@ -3286,7 +3355,7 @@ if ('serviceWorker' in navigator) {
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloaded) return;
-    if ($('editor').open || $('brandSheet').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('themeDialog').open || $('sortPrefDialog').open || $('shareConfirm').open || $('joinConfirm').open) return; // never lose an open form
+    if (joinLoading || pendingDeepLinkCleanUrl || $('editor').open || $('brandSheet').open || $('importer').open || $('scanner').open || $('photoSheet').open || $('aiKeyDialog').open || $('listDialog').open || $('listMenu').open || $('themeDialog').open || $('sortPrefDialog').open || $('shareConfirm').open || $('joinConfirm').open || $('inAppGate').open) return; // never lose an open form or pending deep link
     reloaded = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(() => {});

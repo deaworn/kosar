@@ -46,6 +46,9 @@ export function parseDeepLink(search = '', hash = '') {
  */
 export function buildDeepLink(baseUrl, key, value, extraParams = null) {
   const u = new URL(String(baseUrl));
+  if (/\/index\.html$/i.test(u.pathname)) {
+    u.pathname = u.pathname.replace(/\/index\.html$/i, '/');
+  }
   u.hash = '';
   u.search = '';
   u.searchParams.set(key, String(value ?? ''));
@@ -55,6 +58,63 @@ export function buildDeepLink(baseUrl, key, value, extraParams = null) {
     }
   }
   return u.toString();
+}
+
+/**
+ * Detects restricted social/messenger in-app WebViews (Messenger, Facebook, Instagram,
+ * Viber, LINE, WeChat, TikTok) whose storage is isolated from Chrome/Safari and the
+ * installed PWA. Returns null for normal browsers and standalone installed PWAs.
+ */
+export function detectInAppBrowser(userAgent = '', { standalone = false } = {}) {
+  if (standalone) return null;
+  const ua = String(userAgent || '');
+  if (!ua) return null;
+  const isAndroid = /Android/i.test(ua);
+  const isIos = /iPhone|iPad|iPod/i.test(ua);
+
+  if (/\b(Orca-Android|MessengerForiOS|MessengerLiteForiOS)\b/i.test(ua)
+    || /FB(?:AN|IAB|_IAB)\/(?:Orca|Messenger)/i.test(ua)
+    || /FBPN\/com\.facebook\.orca/i.test(ua)) {
+    return { id: 'messenger', label: 'Messenger', isAndroid, isIos };
+  }
+  if (/\b(FBAN|FBAV|FB_IAB|FBIOS|FB4A)\b/i.test(ua)) {
+    return { id: 'facebook', label: 'Facebook', isAndroid, isIos };
+  }
+  if (/\bInstagram\b/i.test(ua)) {
+    return { id: 'instagram', label: 'Instagram', isAndroid, isIos };
+  }
+  if (/\bViber\b/i.test(ua)) {
+    return { id: 'viber', label: 'Viber', isAndroid, isIos };
+  }
+  if (/\b(Line\/|MicroMessenger|BytedanceWebview|Musical_ly)\b/i.test(ua)) {
+    return { id: 'inapp', label: 'beépített böngésző', isAndroid, isIos };
+  }
+  return null;
+}
+
+/**
+ * Returns plain Hungarian guidance for opening an incoming deep link outside an
+ * in-app WebView so it lands in Chrome/Safari or the installed Kosár PWA.
+ */
+export function inAppBrowserHint(env, linkType = 'join') {
+  const label = env?.label || 'beépített böngésző';
+  const kindWord = linkType === 'join' ? 'közös lista meghívót'
+    : linkType === 'list' ? 'megosztott listát'
+      : linkType === 'ai' ? 'kulcs-linket'
+        : 'linket';
+  const body = label === 'beépített böngésző'
+    ? `A beépített böngésző külön tárolja a listákat, ezért a ${kindWord} a telefon böngészőjében érdemes megnyitni.`
+    : `A ${label} beépített böngészője külön tárolja a listákat, ezért a ${kindWord} a telefon böngészőjében érdemes megnyitni.`;
+  const steps = env?.isIos
+    ? 'Koppints a jobb felső vagy alsó ⋯ (vagy megosztás) gombra → Megnyitás Safariban. Ha úgy egyszerűbb, másold ki a linket és illeszd be a Safariba.'
+    : 'Koppints a jobb felső ⋯ menüre → Megnyitás külső böngészőben (vagy Megnyitás Chrome-ban). Ha nem látod, másold ki a linket és nyisd meg Chrome-ban.';
+  return {
+    title: 'Nyisd meg a böngészőben',
+    body,
+    steps,
+    copyLabel: 'Link másolása',
+    continueLabel: 'Megnyitás mégis itt',
+  };
 }
 
 /**
